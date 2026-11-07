@@ -24,7 +24,10 @@ class LLMClient:
         """
         extra_system_context = []
         if user_memory and user_memory.strip():
-            extra_system_context.append(f"[PERSISTENT USER MEMORY ACROSS CONVERSATIONS]:\n{user_memory.strip()}")
+            extra_system_context.append(
+                f"[ACTIVE PERSISTENT USER MEMORY ACROSS ALL CONVERSATIONS]:\n{user_memory.strip()}\n"
+                "INSTRUCTION: You must strictly remember and respect this memory. Always address the user by their preferred name and accurately answer any questions about their identity or saved facts."
+            )
         
         user_and_assistant = []
         for msg in messages:

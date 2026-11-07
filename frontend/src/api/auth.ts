@@ -85,13 +85,15 @@ export async function apiLoginEmail(
 export async function apiLoginGoogle(mockEmail?: string): Promise<AuthResult> {
   try {
     const email = mockEmail || "user@autonexis.com";
+    const rawName = email.split("@")[0].replace(/[0-9._-]+/g, " ").trim();
+    const cleanName = rawName ? rawName.charAt(0).toUpperCase() + rawName.slice(1) : "Friend";
     const res = await fetch(`${API_BASE_URL}/auth/google`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id_token: "mock_google_id_token",
         email: email,
-        display_name: "Google User",
+        display_name: cleanName,
         sub: `google_${Date.now()}`,
       }),
     });

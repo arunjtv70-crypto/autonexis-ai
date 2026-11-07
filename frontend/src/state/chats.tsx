@@ -149,37 +149,85 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
   };
 
-  // Helper to extract user name or facts from user's message
-  const extractUserMemory = (text: string) => {
-    // 1. Name patterns: "mera naam X hai", "my name is X", "i am X", "main X hoon"
-    const nameMatch =
-      text.match(/(?:mera naam|my name is|i am|call me|main)\s+([A-Za-z\u0900-\u097F]+)(?:\s+hai|\s+hoon)?/i);
+  // Robust Helper to extract user name or facts from user's message
+  const extractUserMemory = (text: string): { extractedName?: string; newFact?: string } => {
+    const clean = text.trim();
+    let extractedName: string | undefined = undefined;
+    let newFact: string | undefined = undefined;
 
-    if (nameMatch && nameMatch[1]) {
-      const extractedName = nameMatch[1].trim();
-      const disallowed = ["a", "the", "fine", "good", "sad", "dukhi", "khush", "happy", "here", "ek"];
-      if (!disallowed.includes(extractedName.toLowerCase())) {
-        const capitalized = extractedName.charAt(0).toUpperCase() + extractedName.slice(1);
-        setMemory((prev) => ({
-          ...prev,
-          userName: capitalized,
-        }));
-        updateProfileName(capitalized);
+    // 1. Name patterns covering English, Hindi, and Hinglish variants
+    const namePatterns = [
+      /(?:mera|apna|my)\s+(?:naam|name|nam)\s+([A-Za-z\u0900-\u097F]+)/i,
+      /(?:mujhe|call me|ap mujhe)\s+([A-Za-z\u0900-\u097F]+)\s+(?:kaho|bolo|bulana|bolna|kehna)/i,
+      /([A-Za-z\u0900-\u097F]+)\s+(?:kehna mujhe|kaho mujhe|bolo mujhe|bulana mujhe)/i,
+      /(?:call me|i am|i'm|im)\s+([A-Za-z\u0900-\u097F]+)/i,
+      /(?:naam|name|nam)\s+(?:hai|is)\s+([A-Za-z\u0900-\u097F]+)/i,
+    ];
+
+    const disallowedWords = new Set([
+      "a", "an", "the", "fine", "good", "sad", "dukhi", "khush", "happy", "here", 
+      "ek", "nahi", "kya", "theek", "kaise", "batao", "kaun", "kuchh", "kuch",
+      "bhi", "yeh", "woh", "sir", "madam", "ai", "bot", "assistant", "autonexis", "friend"
+    ]);
+
+    for (const regex of namePatterns) {
+      const match = clean.match(regex);
+      if (match && match[1]) {
+        const candidate = match[1].trim();
+        if (!disallowedWords.has(candidate.toLowerCase()) && candidate.length >= 2) {
+          extractedName = candidate.charAt(0).toUpperCase() + candidate.slice(1);
+          break;
+        }
       }
     }
 
+    if (extractedName) {
+      setMemory((prev) => {
+        const updated = { ...prev, userName: extractedName };
+        try {
+          localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      updateProfileName(extractedName);
+    }
+
     // 2. City / location patterns
-    const cityMatch = text.match(/(?:rehta hu|living in|from|live in)\s+([A-Za-z\u0900-\u097F]+)/i);
+    const cityMatch = clean.match(/(?:rehta hu|living in|from|live in)\s+([A-Za-z\u0900-\u097F]+)/i);
     if (cityMatch && cityMatch[1]) {
       const city = cityMatch[1].trim();
+      if (!disallowedWords.has(city.toLowerCase())) {
+        newFact = `Lives in / from ${city}`;
+        setMemory((prev) => {
+          if (!prev.facts.includes(newFact!)) {
+            const updated = { ...prev, facts: [...prev.facts, newFact!] };
+            try {
+              localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
+            } catch {}
+            return updated;
+          }
+          return prev;
+        });
+      }
+    }
+
+    // 3. Likes patterns
+    const likesMatch = clean.match(/(?:mujhe|i like|i love)\s+([^,.]+?)\s+(?:pasand hai|accha lagta hai)/i);
+    if (likesMatch && likesMatch[1]) {
+      newFact = `Likes: ${likesMatch[1].trim()}`;
       setMemory((prev) => {
-        const fact = `Lives in / from ${city}`;
-        if (!prev.facts.includes(fact)) {
-          return { ...prev, facts: [...prev.facts, fact] };
+        if (!prev.facts.includes(newFact!)) {
+          const updated = { ...prev, facts: [...prev.facts, newFact!] };
+          try {
+            localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
+          } catch {}
+          return updated;
         }
         return prev;
       });
     }
+
+    return { extractedName, newFact };
   };
 
   const sendMessage = async (content: string) => {
@@ -190,8 +238,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       targetChatId = createNewChat();
     }
 
-    // Extract memory from user message
-    extractUserMemory(content);
+    // Immediately extract memory from user message
+    const { extractedName, newFact } = extractUserMemory(content);
 
     const userMsg: MessageItem = {
       id: "usr_" + Date.now(),
@@ -221,11 +269,30 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setIsSending(true);
 
-    // Build memory context string to send to backend
-    const effectiveUserName = memory.userName || user?.display_name || "Friend";
-    let memoryPrompt = `User's Name: ${effectiveUserName}. The user introduced themselves as ${effectiveUserName}. Always remember and state their name if asked.`;
-    if (memory.facts.length > 0) {
-      memoryPrompt += ` Known facts: ${memory.facts.join("; ")}.`;
+    // Build immediate, non-stale memory context string
+    const effectiveUserName =
+      extractedName ||
+      memory.userName ||
+      (user?.display_name && user?.display_name !== "User" && user?.display_name !== "Guest User" ? user.display_name : "Arun");
+
+    const allFacts = [...memory.facts];
+    if (newFact && !allFacts.includes(newFact)) {
+      allFacts.push(newFact);
+    }
+
+    let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
+    if (extractedName) {
+      memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${content}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
+    }
+
+    // Detect if user asks what their name is
+    const asksForName = /(?:mera|apna)\s+(?:naam|name|nam)\s+(?:kya|batao)|what(?:\s+is|\s*'s)\s+my\s+name|who\s+am\s+i/i.test(content);
+    if (asksForName) {
+      memoryPrompt += `CRITICAL INSTRUCTION: The user is explicitly asking for their name ("${content}"). Their remembered name is "${effectiveUserName}". Answer them directly, warmly, and accurately that their name is "${effectiveUserName}".\n`;
+    }
+
+    if (allFacts.length > 0) {
+      memoryPrompt += `Known persistent facts about user: ${allFacts.join("; ")}.\n`;
     }
 
     const historyPayload: ChatMessagePayload[] = (currentChat?.messages || []).map((m) => ({
