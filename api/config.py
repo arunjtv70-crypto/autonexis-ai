@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
     # Firebase Authentication
-    firebase_project_id: str = "autonexis-ai"
+    firebase_project_id: str = "autonexis-ai-assistant"
 
     # Security & Session
     jwt_secret: str = "autonexis_super_secret_jwt_key_2026_change_in_prod"

@@ -1,13 +1,14 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 
+// Public Firebase Web Client Configuration (safe for frontend)
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDABjmFi6A0XD93s9BhC5-B5mGEXdtZSFs",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "autonexis-ai.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "autonexis-ai",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "autonexis-ai.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "719867680502",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:719867680502:web:ac5553aad21a1a655f3ed7",
+  apiKey: "AIzaSyAvl-3er0vXWecXDfTH6Bq_UFucFMfX4VI",
+  authDomain: "autonexis-ai-assistant.firebaseapp.com",
+  projectId: "autonexis-ai-assistant",
+  storageBucket: "autonexis-ai-assistant.firebasestorage.app",
+  messagingSenderId: "312176579650",
+  appId: "1:312176579650:web:1ce2b8e1d7071f60c609db",
 };
 
 // Initialize Firebase singleton
@@ -16,4 +17,3 @@ export const auth = getAuth(app);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: "select_account" });
-

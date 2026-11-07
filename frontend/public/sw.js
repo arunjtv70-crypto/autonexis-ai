@@ -1,13 +1,21 @@
-// Self-destructing Service Worker to ensure fresh assets
+// AUTONEXIS Service Worker - Cache Busting Version: autonexis-v20261108-assistant
+const CACHE_NAME = 'autonexis-v20261108-assistant';
+
 self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
-      .then(() => self.registration.unregister())
-      .then(() => self.clients.claim())
+    caches.keys().then((keys) => {
+      return Promise.all(
+        keys.map((key) => {
+          return caches.delete(key);
+        })
+      );
+    })
+    .then(() => self.registration.unregister())
+    .then(() => self.clients.claim())
   );
 });
 

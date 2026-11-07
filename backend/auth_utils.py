@@ -23,7 +23,7 @@ def verify_firebase_id_token(token: str) -> Dict[str, Any]:
         decoded = google.oauth2.id_token.verify_firebase_token(
             token,
             http_request,
-            audience=settings.firebase_project_id
+            audience="autonexis-ai-assistant"
         )
         if not decoded or not (decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")):
             raise ValueError("Token missing uid claim.")
