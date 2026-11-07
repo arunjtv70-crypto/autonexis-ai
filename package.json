@@ -7,6 +7,7 @@
     "frontend"
   ],
   "scripts": {
+    "start": "python run.py",
     "dev": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",
     "preview": "npm --prefix frontend run preview"

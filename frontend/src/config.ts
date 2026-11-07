@@ -7,12 +7,9 @@
 export const APP_NAME = "AUTONEXIS Assistant";
 export const APP_SHORT_NAME = "AUTONEXIS";
 
-// Base URL from environment (auto-detects production / Vercel vs local development)
+// Base URL from environment or relative /api for unified single-origin serving
 export const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  (typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1"
-    ? "/api"
-    : "http://localhost:8000/api")
+  import.meta.env.VITE_API_BASE_URL || "/api"
 ).replace(/\/+$/, "");
 
 // Google OAuth Client ID (Public client ID only, never secret keys)
