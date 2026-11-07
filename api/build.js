@@ -19,8 +19,8 @@ if (!fs.existsSync(frontendDir)) {
 
 console.log('📁 Located frontend directory at:', frontendDir);
 
-console.log('📦 Installing frontend dependencies...');
-execSync('npm install', { cwd: frontendDir, stdio: 'inherit' });
+console.log('📦 Installing frontend dependencies (including optional)...');
+execSync('npm install --include=optional', { cwd: frontendDir, stdio: 'inherit' });
 
 console.log('🔨 Building frontend production bundle...');
 execSync('npm run build', { cwd: frontendDir, stdio: 'inherit' });

@@ -94,8 +94,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const res = await apiRegisterEmail(email, pass, name);
-      if (!res.success) {
-        return { success: false, error: res.error };
+      if (!res.success || !res.token || !res.user) {
+        return { success: false, error: res.error || "Authentication failed." };
       }
       saveSession(res.token, res.user, false);
       return { success: true };
@@ -109,8 +109,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const res = await apiLoginEmail(email, pass);
-      if (!res.success) {
-        return { success: false, error: res.error };
+      if (!res.success || !res.token || !res.user) {
+        return { success: false, error: res.error || "Authentication failed." };
       }
       saveSession(res.token, res.user, false);
       return { success: true };
@@ -124,8 +124,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const res = await apiLoginGoogle(mockEmail);
-      if (!res.success) {
-        return { success: false, error: res.error };
+      if (!res.success || !res.token || !res.user) {
+        return { success: false, error: res.error || "Authentication failed." };
       }
       saveSession(res.token, res.user, false);
       return { success: true };
@@ -153,8 +153,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const res = await apiVerifyOtp(phone, otp);
-      if (!res.success) {
-        return { success: false, error: res.error };
+      if (!res.success || !res.token || !res.user) {
+        return { success: false, error: res.error || "Authentication failed." };
       }
       saveSession(res.token, res.user, false);
       return { success: true };

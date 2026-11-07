@@ -3,9 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "description": "AUTONEXIS Assistant - Premium AI Chat Assistant",
-  "workspaces": [
-    "frontend"
-  ],
   "scripts": {
     "start": "python run.py",
     "dev": "npm --prefix frontend run dev",

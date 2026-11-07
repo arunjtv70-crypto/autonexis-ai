@@ -9,18 +9,12 @@ export interface UserResponse {
   created_at?: string;
 }
 
-export interface AuthSuccessResult {
-  success: true;
-  token: string;
-  user: UserResponse;
+export interface AuthResult {
+  success: boolean;
+  token?: string;
+  user?: UserResponse;
+  error?: string;
 }
-
-export interface AuthErrorResult {
-  success: false;
-  error: string;
-}
-
-export type AuthResult = AuthSuccessResult | AuthErrorResult;
 
 export async function apiRegisterEmail(
   email: string,
