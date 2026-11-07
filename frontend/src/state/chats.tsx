@@ -38,6 +38,72 @@ const MEMORY_STORAGE_KEY = "autonexis_user_memories";
 
 const ChatsContext = createContext<ChatsContextType | undefined>(undefined);
 
+// Helper function to extract any personal facts mentioned across all chats
+function extractAllFactsFromChats(allChats: ChatItem[]): string[] {
+  const factsSet = new Set<string>();
+
+  for (const c of allChats) {
+    if (!c.messages) continue;
+    for (const m of c.messages) {
+      if (m.role === "user") {
+        const text = m.content.trim();
+        // City / Location
+        const cityMatch = text.match(/(?:rehta hu|living in|from|live in)\s+([A-Za-z\u0900-\u097F]+)/i);
+        if (cityMatch && cityMatch[1] && cityMatch[1].length >= 3) {
+          factsSet.add(`Lives in: ${cityMatch[1].trim()}`);
+        }
+        // Work / Role
+        const profMatch = text.match(/(?:kaam karta hu|working as|main ek|i am a|i work as)\s+([A-Za-z\u0900-\u097F\s]{3,25})/i);
+        if (profMatch && profMatch[1]) {
+          factsSet.add(`Work: ${profMatch[1].trim()}`);
+        }
+        // Likes
+        const likeMatch = text.match(/(?:mujhe|i like|i love)\s+([^,.]+?)\s+(?:pasand hai|accha lagta hai)/i);
+        if (likeMatch && likeMatch[1]) {
+          factsSet.add(`Likes: ${likeMatch[1].trim()}`);
+        }
+      }
+    }
+  }
+
+  return Array.from(factsSet);
+}
+
+// Function to build rich cross-chat memory and summaries
+function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | null): string {
+  // Filter other chats that have messages
+  const pastChats = allChats.filter((c) => c.id !== currentId && c.messages && c.messages.length > 0);
+  if (pastChats.length === 0) return "";
+
+  const sections: string[] = [];
+  sections.push("[CROSS-CHAT MEMORY - PREVIOUS CONVERSATIONS WITH THIS USER]:");
+  sections.push("Below is what the user talked about in their other previous chats. You MUST remember these facts, topics, and discussions if the user asks about them or refers to past chats:\n");
+
+  // Include up to 6 recent past chats
+  const recentPast = pastChats.slice(0, 6);
+
+  recentPast.forEach((pc, idx) => {
+    const userMessages = pc.messages.filter((m) => m.role === "user").map((m) => m.content);
+    const assistantMessages = pc.messages.filter((m) => m.role === "assistant").map((m) => m.content);
+    const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : "";
+
+    sections.push(`--- Past Chat #${idx + 1}: "${pc.title}" ---`);
+    if (userMessages.length > 0) {
+      sections.push(`User said: ${userMessages.map((m) => `"${m}"`).join(" -> ")}`);
+    }
+    if (lastAssistant) {
+      const truncated = lastAssistant.length > 200 ? lastAssistant.slice(0, 200) + "..." : lastAssistant;
+      sections.push(`Assistant replied: "${truncated.replace(/\n+/g, " ")}"`);
+    }
+  });
+
+  sections.push("\nINSTRUCTION FOR CROSS-CHAT MEMORY:");
+  sections.push("1. When the user asks 'humne pehle kya baat ki thi?', 'pichli chat me maine kya bola tha?', 'tujhe yaad hai?', or refers to an earlier conversation, ALWAYS use the above past chats to answer accurately and with personal detail.");
+  sections.push("2. NEVER say 'I don't remember past chats' or 'Each chat is separate'. In AUTONEXIS Assistant, you have active continuous memory across all chats!");
+
+  return sections.join("\n");
+}
+
 export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, updateProfileName } = useAuth();
 
@@ -45,12 +111,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [memory, setMemory] = useState<UserMemoryStore>(() => {
     try {
       const stored = localStorage.getItem(MEMORY_STORAGE_KEY);
-      if (stored) return JSON.parse(stored);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return {
+          userName: parsed.userName || (user?.display_name && user.display_name !== "User" && user.display_name !== "Guest User" && user.display_name !== "Google User" ? user.display_name : "Arun"),
+          facts: Array.isArray(parsed.facts) ? parsed.facts : [],
+        };
+      }
     } catch {
       // Ignore
     }
     return {
-      userName: user?.display_name !== "User" && user?.display_name !== "Guest" ? user?.display_name : undefined,
+      userName: user?.display_name && user.display_name !== "User" && user.display_name !== "Guest User" && user.display_name !== "Google User" ? user.display_name : "Arun",
       facts: [],
     };
   });
@@ -275,10 +347,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       memory.userName ||
       (user?.display_name && user?.display_name !== "User" && user?.display_name !== "Guest User" ? user.display_name : "Arun");
 
-    const allFacts = [...memory.facts];
-    if (newFact && !allFacts.includes(newFact)) {
-      allFacts.push(newFact);
-    }
+    // Gather facts from current memory and scan across all past chats
+    const pastFacts = extractAllFactsFromChats(chats);
+    const combinedFactsSet = new Set([...memory.facts, ...pastFacts]);
+    if (newFact) combinedFactsSet.add(newFact);
+    const allFacts = Array.from(combinedFactsSet);
+
+    // Build rich cross-chat memory recap from all other conversations
+    const crossChatContext = getCrossChatMemoryContext(chats, targetChatId);
 
     let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
     if (extractedName) {
@@ -291,8 +367,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       memoryPrompt += `CRITICAL INSTRUCTION: The user is explicitly asking for their name ("${content}"). Their remembered name is "${effectiveUserName}". Answer them directly, warmly, and accurately that their name is "${effectiveUserName}".\n`;
     }
 
+    // Detect if user asks about past chats / previous conversations
+    const asksAboutPastChats = /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation|cheto|chizo|kya\s+baat)|tujhe\s+yaad\s+hai|kya\s+yaad\s+hai|do\s+you\s+remember/i.test(content);
+    if (asksAboutPastChats) {
+      memoryPrompt += `\nCRITICAL DIRECTIVE: The user is explicitly asking about their past conversations ("${content}"). You MUST review the past conversations listed below and summarize clearly, warmly, and accurately what they discussed with you in previous chats. Never claim you forgot or cannot see past chats.\n`;
+    }
+
     if (allFacts.length > 0) {
-      memoryPrompt += `Known persistent facts about user: ${allFacts.join("; ")}.\n`;
+      memoryPrompt += `Known persistent facts about user: ${allFacts.join("; ")}.\n\n`;
+    }
+
+    if (crossChatContext) {
+      memoryPrompt += `${crossChatContext}\n`;
     }
 
     const historyPayload: ChatMessagePayload[] = (currentChat?.messages || []).map((m) => ({

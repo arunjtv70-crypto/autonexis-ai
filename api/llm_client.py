@@ -25,8 +25,12 @@ class LLMClient:
         extra_system_context = []
         if user_memory and user_memory.strip():
             extra_system_context.append(
-                f"[ACTIVE PERSISTENT USER MEMORY ACROSS ALL CONVERSATIONS]:\n{user_memory.strip()}\n"
-                "INSTRUCTION: You must strictly remember and respect this memory. Always address the user by their preferred name and accurately answer any questions about their identity or saved facts."
+                f"[CONTINUOUS PERSISTENT CROSS-CHAT MEMORY]:\n{user_memory.strip()}\n\n"
+                "CRITICAL MEMORY MANDATE: You have 100% active memory across all previous conversations. "
+                "The memories and chat logs provided above are your true memories with this user. "
+                "If the user asks what was discussed in past chats, tests your memory, or asks for their name/details, "
+                "answer accurately and warmly from this history. "
+                "NEVER say you do not remember or that you cannot access past conversations."
             )
         
         user_and_assistant = []
