@@ -25,10 +25,14 @@ interface ChatsContextType {
   chats: ChatItem[];
   activeChatId: string | null;
   activeChat: ChatItem | null;
+  memory: UserMemoryStore;
   createNewChat: () => string;
   selectChat: (id: string) => void;
   deleteChat: (id: string) => void;
   renameChat: (id: string, newTitle: string) => void;
+  clearAllChats: () => void;
+  resetMemory: () => void;
+  updateCallName: (name: string) => void;
   sendMessage: (content: string) => Promise<void>;
   isSending: boolean;
 }
@@ -219,6 +223,44 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setChats((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title: newTitle.trim() || c.title } : c))
     );
+  };
+
+  const clearAllChats = () => {
+    const freshId = "chat-" + Date.now();
+    const freshChat: ChatItem = {
+      id: freshId,
+      title: "New Chat",
+      updated_at: "Just now",
+      messages: [],
+    };
+    setChats([freshChat]);
+    setActiveChatId(freshId);
+    try {
+      localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify([freshChat]));
+    } catch {}
+  };
+
+  const resetMemory = () => {
+    const freshMemory: UserMemoryStore = {
+      userName: "Arun",
+      facts: [],
+    };
+    setMemory(freshMemory);
+    try {
+      localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(freshMemory));
+    } catch {}
+  };
+
+  const updateCallName = (name: string) => {
+    const clean = name.trim();
+    if (!clean) return;
+    setMemory((prev) => {
+      const updated = { ...prev, userName: clean };
+      try {
+        localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
   };
 
   // Robust Helper to extract user name or facts from user's message
@@ -467,10 +509,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         chats,
         activeChatId,
         activeChat,
+        memory,
         createNewChat,
         selectChat,
         deleteChat,
         renameChat,
+        clearAllChats,
+        resetMemory,
+        updateCallName,
         sendMessage,
         isSending,
       }}

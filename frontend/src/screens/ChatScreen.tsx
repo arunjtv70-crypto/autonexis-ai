@@ -5,6 +5,7 @@ import { Logo } from "../components/Logo";
 import { Button } from "../components/Button";
 import { Drawer } from "../components/Drawer";
 import { SettingsModal } from "../components/SettingsModal";
+import { UserMenuDropdown, type SettingsTabId } from "../components/UserMenuDropdown";
 import {
   IconMenu,
   IconPlus,
@@ -19,13 +20,28 @@ import "./ChatScreen.css";
 
 export const ChatScreen: React.FC = () => {
   const { chats, activeChat, activeChatId, selectChat, createNewChat, deleteChat, sendMessage, isSending } = useChats();
-  const { user, isGuest, setIsAuthScreenVisible } = useAuth();
+  const { user, isGuest, setIsAuthScreenVisible, logout } = useAuth();
 
   const [inputContent, setInputContent] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("account");
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Global Ctrl+Shift+, Keyboard Shortcut for Settings
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "," || e.key === "<")) {
+        e.preventDefault();
+        setSettingsTab("account");
+        setIsSettingsOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -145,20 +161,39 @@ export const ChatScreen: React.FC = () => {
       </div>
 
       {/* Bottom User Profile & Settings */}
-      <div className="sidebar-bottom">
-        <div className="user-profile-pill" onClick={() => setIsSettingsOpen(true)}>
+      <div className="sidebar-bottom" style={{ position: "relative" }}>
+        <div
+          className="user-profile-pill"
+          onClick={() => setIsUserMenuOpen((prev) => !prev)}
+          title="Account Menu"
+        >
           <div className="user-avatar-circle">
-            <img src="/logo_icon.png" alt="User" className="user-avatar-img" />
+            <img
+              src={localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png"}
+              alt="User"
+              className="user-avatar-img"
+            />
           </div>
           <div className="user-profile-info">
             <span className="user-name-text">
-              {user?.display_name || (isGuest ? "Guest User" : "User")}
+              {user?.display_name || (isGuest ? "Guest User" : "Arun")}
             </span>
             <span className="user-status-text">
-              {isGuest ? "Guest Mode" : "Online"}
+              {user?.email || (isGuest ? "Guest Session" : "arunjtv70@gmail.com")}
             </span>
           </div>
         </div>
+
+        <UserMenuDropdown
+          isOpen={isUserMenuOpen}
+          onClose={() => setIsUserMenuOpen(false)}
+          userEmail={user?.email || (isGuest ? "guest@autonexis.ai" : "arunjtv70@gmail.com")}
+          onOpenSettings={(tab) => {
+            setSettingsTab(tab || "account");
+            setIsSettingsOpen(true);
+          }}
+          onLogout={logout}
+        />
 
         {isGuest ? (
           <button
@@ -173,9 +208,12 @@ export const ChatScreen: React.FC = () => {
           <button
             type="button"
             className="settings-trigger-btn"
-            onClick={() => setIsSettingsOpen(true)}
+            onClick={() => {
+              setSettingsTab("account");
+              setIsSettingsOpen(true);
+            }}
             aria-label="Settings"
-            title="Settings"
+            title="Settings (Ctrl+Shift+,)"
           >
             <IconSettings size={18} />
           </button>
@@ -244,9 +282,12 @@ export const ChatScreen: React.FC = () => {
             <button
               type="button"
               className="topbar-action-btn"
-              onClick={() => setIsSettingsOpen(true)}
+              onClick={() => {
+                setSettingsTab("account");
+                setIsSettingsOpen(true);
+              }}
               aria-label="Settings"
-              title="Settings"
+              title="Settings (Ctrl+Shift+,)"
             >
               <IconSettings size={18} />
             </button>
@@ -377,6 +418,7 @@ export const ChatScreen: React.FC = () => {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        initialTab={settingsTab}
       />
     </div>
   );
