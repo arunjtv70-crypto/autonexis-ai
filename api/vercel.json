@@ -1,0 +1,23 @@
+{
+  "buildCommand": "node build.js",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "index.py": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": "/index.py"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/index.py"
+    },
+    {
+      "source": "/((?!assets/|favicon.*|icon-.*|logo.*|manifest.*|sw\\.js|.*\\..*).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
