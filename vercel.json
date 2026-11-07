@@ -1,14 +1,23 @@
 {
-  "version": 2,
   "buildCommand": "npm --prefix frontend install && npm --prefix frontend run build",
   "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "backend/**",
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
+    {
+      "source": "/api",
+      "destination": "/api/index.py"
+    },
     {
       "source": "/api/(.*)",
       "destination": "/api/index.py"
     },
     {
-      "source": "/((?!assets/|favicon.png|logo.png|logo_circle.png|logo_icon.png|.*\\..*).*)",
+      "source": "/((?!assets/|favicon.*|icon-.*|logo.*|manifest.*|sw\\.js|.*\\..*).*)",
       "destination": "/index.html"
     }
   ]

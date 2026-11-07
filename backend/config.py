@@ -3,7 +3,12 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
-IS_VERCEL = bool(os.environ.get("VERCEL"))
+IS_VERCEL = bool(
+    os.environ.get("VERCEL")
+    or os.environ.get("VERCEL_ENV")
+    or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    or os.environ.get("VERCEL_REGION")
+)
 DEFAULT_DB_URL = "sqlite+aiosqlite:////tmp/autonexis.db" if IS_VERCEL else "sqlite+aiosqlite:///./autonexis.db"
 
 class Settings(BaseSettings):

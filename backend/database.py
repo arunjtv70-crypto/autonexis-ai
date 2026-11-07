@@ -74,11 +74,21 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False
 )
 
+_tables_initialized = False
+
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global _tables_initialized
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        _tables_initialized = True
+    except Exception as e:
+        print(f"Database init note: {e}")
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    global _tables_initialized
+    if not _tables_initialized:
+        await init_db()
     async with AsyncSessionLocal() as session:
         try:
             yield session

@@ -1,9 +1,15 @@
 import sys
 import os
 
-# Ensure backend directory is discoverable by Python runtime on Vercel
-backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
-if backend_dir not in sys.path:
-    sys.path.insert(0, backend_dir)
+current_dir = os.path.abspath(os.path.dirname(__file__))
+parent_backend = os.path.abspath(os.path.join(current_dir, "..", "backend"))
+local_backend = os.path.abspath(os.path.join(current_dir, "backend"))
 
-from main import app
+for path in [parent_backend, local_backend, current_dir]:
+    if os.path.exists(path) and path not in sys.path:
+        sys.path.insert(0, path)
+
+try:
+    from main import app
+except ImportError:
+    from backend.main import app
