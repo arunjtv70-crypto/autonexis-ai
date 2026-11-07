@@ -21,10 +21,12 @@ export const AuthScreen: React.FC = () => {
 
   // Feedback messages
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   const clearMessages = () => {
     setErrorMsg(null);
+    setErrorCode(null);
     setInfoMsg(null);
   };
 
@@ -42,6 +44,7 @@ export const AuthScreen: React.FC = () => {
       const res = await signupEmail(name, email, password);
       if (!res.success) {
         setErrorMsg(res.error || "Sign up failed. Please try again.");
+        if (res.errorCode) setErrorCode(res.errorCode);
       } else if (res.message) {
         setInfoMsg(res.message);
       }
@@ -49,6 +52,7 @@ export const AuthScreen: React.FC = () => {
       const res = await loginEmail(email, password);
       if (!res.success) {
         setErrorMsg(res.error || "Invalid email or password.");
+        if (res.errorCode) setErrorCode(res.errorCode);
       }
     }
   };
@@ -63,6 +67,7 @@ export const AuthScreen: React.FC = () => {
     const res = await sendPasswordReset(email);
     if (!res.success) {
       setErrorMsg(res.error || "Failed to send reset email.");
+      if (res.errorCode) setErrorCode(res.errorCode);
     } else {
       setInfoMsg(res.message || "Password reset instructions have been sent to your email.");
     }
@@ -74,6 +79,7 @@ export const AuthScreen: React.FC = () => {
     const res = await loginGoogle();
     if (!res.success) {
       setErrorMsg(res.error || "Google sign-in was canceled.");
+      if (res.errorCode) setErrorCode(res.errorCode);
     }
   };
 
@@ -118,7 +124,12 @@ export const AuthScreen: React.FC = () => {
         {/* Alerts */}
         {errorMsg && (
           <div className="auth-alert alert-error" role="alert">
-            {errorMsg}
+            <div>{errorMsg}</div>
+            {errorCode && (
+              <div style={{ fontSize: "0.75rem", opacity: 0.8, marginTop: "4px", fontFamily: "monospace" }}>
+                {errorCode}
+              </div>
+            )}
           </div>
         )}
         {infoMsg && (

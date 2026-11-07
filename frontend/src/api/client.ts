@@ -1,7 +1,6 @@
 import { API_BASE_URL } from "../config";
 import { auth } from "../firebase";
 import { signOut } from "firebase/auth";
-import { getOrCreateSessionId } from "./settings";
 
 export interface ChatMessagePayload {
   role: "user" | "assistant";
@@ -14,7 +13,6 @@ export interface ChatMessagePayload {
 async function getAuthHeaders(): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "X-Session-Id": getOrCreateSessionId(),
   };
   const currentUser = auth.currentUser;
   if (currentUser) {

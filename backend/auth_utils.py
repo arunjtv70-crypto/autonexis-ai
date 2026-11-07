@@ -2,16 +2,13 @@ import logging
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import firebase_admin
-from firebase_admin import auth as admin_auth
 import google.oauth2.id_token
 import google.auth.transport.requests
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
-from database import User, get_db
-from firestore_service import touch_session_activity, init_firebase_admin
+from backend.config import settings
+from backend.database import User, get_db
 
 logger = logging.getLogger("autonexis.auth")
 security = HTTPBearer(auto_error=False)
@@ -19,30 +16,9 @@ http_request = google.auth.transport.requests.Request()
 
 def verify_firebase_id_token(token: str) -> Dict[str, Any]:
     """
-    Verifies a Firebase ID token.
-    First tries Firebase Admin SDK with check_revoked=True to ensure revoked tokens are rejected.
-    Falls back to Google oauth2 id_token verifier.
+    Verifies a Firebase ID token using google.oauth2.id_token.verify_firebase_token.
+    Requires no service account file or firebase-admin package.
     """
-    init_firebase_admin()
-    if firebase_admin._apps:
-        try:
-            decoded = admin_auth.verify_id_token(token, check_revoked=True)
-            if decoded and (decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")):
-                return decoded
-        except admin_auth.RevokedIdTokenError:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your session has been revoked. Please log in again."
-            )
-        except admin_auth.UserNotFoundError:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User account no longer exists."
-            )
-        except Exception as exc:
-            logger.debug(f"Admin auth check note: {exc}")
-
-    # Fallback / standard verification
     try:
         decoded = google.oauth2.id_token.verify_firebase_token(
             token,
@@ -65,10 +41,9 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db)
 ) -> User:
     """
-    FastAPI dependency that validates Firebase ID token from Authorization: Bearer <token>.
+    FastAPI dependency that validates the Firebase ID token from Authorization: Bearer <token>.
     Guarantees user.id is the verified Firebase UID.
     Auto-provisions the user record in SQLite if not yet present.
-    Also touches session activity if X-Session-Id header is present.
     """
     if not auth or not auth.credentials:
         raise HTTPException(
@@ -88,14 +63,6 @@ async def get_current_user(
         display_name = email.split("@")[0].replace(".", " ").title()
     else:
         display_name = "AUTONEXIS User"
-
-    # Throttled session activity update on normal authenticated requests
-    session_id = request.headers.get("x-session-id")
-    if session_id:
-        try:
-            await touch_session_activity(uid, session_id)
-        except Exception:
-            pass
 
     # Query existing user by verified Firebase UID
     stmt = select(User).where(User.id == uid)

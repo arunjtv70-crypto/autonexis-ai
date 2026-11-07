@@ -268,7 +268,7 @@ export const ChatScreen: React.FC = () => {
           type="button"
           className="sidebar-nav-btn"
           onClick={() => {
-            setSettingsTab("capabilities");
+            setSettingsTab("account");
             setIsSettingsOpen(true);
           }}
         >
@@ -297,13 +297,13 @@ export const ChatScreen: React.FC = () => {
           type="button"
           className="sidebar-nav-btn"
           onClick={() => {
-            setSettingsTab("your_autonexis");
+            setSettingsTab("account");
             setIsSettingsOpen(true);
           }}
         >
           <div className="sidebar-nav-btn-left">
             <IconSettings size={15} />
-            <span>Customize</span>
+            <span>Settings</span>
           </div>
         </button>
       </div>

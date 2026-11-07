@@ -14,7 +14,6 @@ import {
 } from "firebase/auth";
 import { auth, googleProvider } from "../firebase";
 import { apiUpdateProfile, type UserResponse } from "../api/auth";
-import { apiRegisterSession, apiGetSettings } from "../api/settings";
 
 export function formatFirebaseAuthError(error: any): string {
   const code = error?.code || "";
@@ -58,10 +57,10 @@ interface AuthContextType {
   isAuthScreenVisible: boolean;
   setIsAuthScreenVisible: (visible: boolean) => void;
   isLoading: boolean;
-  loginEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
-  signupEmail: (name: string, email: string, pass: string) => Promise<{ success: boolean; error?: string; message?: string }>;
-  loginGoogle: () => Promise<{ success: boolean; error?: string }>;
-  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string; message?: string }>;
+  loginEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string; errorCode?: string }>;
+  signupEmail: (name: string, email: string, pass: string) => Promise<{ success: boolean; error?: string; errorCode?: string; message?: string }>;
+  loginGoogle: () => Promise<{ success: boolean; error?: string; errorCode?: string }>;
+  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string; errorCode?: string; message?: string }>;
   logout: () => Promise<void>;
   updateProfileName: (name: string) => Promise<void>;
 }
@@ -104,18 +103,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(mapped);
       setToken(idToken);
       setIsAuthScreenVisible(false);
-
-      // Register current session and load preferences from backend
-      apiRegisterSession().catch((err) => console.warn("[AUTONEXIS] Session register note:", err));
-      apiGetSettings().then((settings) => {
-        if (settings?.display_name) {
-          setUser((prev) => prev ? {
-            ...prev,
-            display_name: settings.display_name,
-            theme_preference: (settings.theme as any) || prev.theme_preference,
-          } : null);
-        }
-      }).catch(() => {});
     } catch (err) {
       console.error("[AUTONEXIS] Failed to extract token:", err);
       setUser(null);
@@ -187,7 +174,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         message: "Account created successfully. A verification link has been sent to your email. Please check your inbox.",
       };
     } catch (err: any) {
-      return { success: false, error: formatFirebaseAuthError(err) };
+      console.error("[AUTONEXIS Auth Error - Signup]", err);
+      return {
+        success: false,
+        error: formatFirebaseAuthError(err),
+        errorCode: err?.code || "auth/unknown",
+      };
     } finally {
       setIsLoading(false);
     }
@@ -202,7 +194,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await syncUser(userCredential.user);
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: formatFirebaseAuthError(err) };
+      console.error("[AUTONEXIS Auth Error - Email Login]", err);
+      return {
+        success: false,
+        error: formatFirebaseAuthError(err),
+        errorCode: err?.code || "auth/unknown",
+      };
     } finally {
       setIsLoading(false);
     }
@@ -216,15 +213,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await syncUser(result.user);
       return { success: true };
     } catch (err: any) {
+      console.error("[AUTONEXIS Auth Error - Google Login]", err);
       if (err?.code === "auth/popup-blocked") {
         try {
           await signInWithRedirect(auth, googleProvider);
           return { success: true };
         } catch (redirectErr: any) {
-          return { success: false, error: formatFirebaseAuthError(redirectErr) };
+          console.error("[AUTONEXIS Auth Error - Google Redirect]", redirectErr);
+          return {
+            success: false,
+            error: formatFirebaseAuthError(redirectErr),
+            errorCode: redirectErr?.code || "auth/popup-blocked",
+          };
         }
       }
-      return { success: false, error: formatFirebaseAuthError(err) };
+      return {
+        success: false,
+        error: formatFirebaseAuthError(err),
+        errorCode: err?.code || "auth/unknown",
+      };
     } finally {
       setIsLoading(false);
     }
@@ -243,7 +250,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         message: "Password reset instructions have been sent to your email.",
       };
     } catch (err: any) {
-      return { success: false, error: formatFirebaseAuthError(err) };
+      console.error("[AUTONEXIS Auth Error - Password Reset]", err);
+      return {
+        success: false,
+        error: formatFirebaseAuthError(err),
+        errorCode: err?.code || "auth/unknown",
+      };
     } finally {
       setIsLoading(false);
     }

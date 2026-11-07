@@ -1,21 +1,8 @@
 import React, { useEffect, useRef } from "react";
-import {
-  IconSettings,
-  IconGlobe,
-  IconHelpCircle,
-  IconDevice,
-  IconLogout,
-} from "./Icons";
+import { IconSettings, IconLogout } from "./Icons";
 import "./UserMenuDropdown.css";
 
-export type SettingsTabId =
-  | "account"
-  | "appearance"
-  | "your_autonexis"
-  | "capabilities"
-  | "privacy"
-  | "language"
-  | "help";
+export type SettingsTabId = "account";
 
 interface UserMenuDropdownProps {
   isOpen: boolean;
@@ -32,7 +19,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
   userEmail,
   onOpenSettings,
   onLogout,
-  onInstallPwa,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -54,9 +40,9 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
 
   return (
     <div className="user-menu-dropdown" ref={menuRef} role="menu">
-      {/* Header with user email / account */}
+      {/* Header with user email */}
       <div className="user-menu-header">
-        <span className="user-menu-email">{userEmail || "user@autonexis.ai"}</span>
+        <span className="user-menu-email">{userEmail || "Signed in"}</span>
       </div>
 
       <div className="user-menu-items">
@@ -74,55 +60,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
             <span>Settings</span>
           </div>
           <span className="user-menu-shortcut">Ctrl+Shift+,</span>
-        </button>
-
-        {/* Language */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            onOpenSettings("language");
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconGlobe size={17} />
-            <span>Language</span>
-          </div>
-        </button>
-
-        {/* Get Help */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            onOpenSettings("help");
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconHelpCircle size={17} />
-            <span>Get help</span>
-          </div>
-        </button>
-
-        {/* Get apps and extensions */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            if (onInstallPwa) {
-              onInstallPwa();
-            } else {
-              onOpenSettings("capabilities");
-            }
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconDevice size={17} />
-            <span>Get apps and extensions</span>
-          </div>
         </button>
 
         <div className="user-menu-divider" />
@@ -145,4 +82,3 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
     </div>
   );
 };
-
