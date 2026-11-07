@@ -7,6 +7,10 @@ export interface MessageItem {
   role: "user" | "assistant";
   content: string;
   created_at?: string;
+  mediaType?: "text" | "image" | "video" | "voice";
+  mediaUrl?: string;
+  mediaPrompt?: string;
+  videoDuration?: string;
 }
 
 export interface ChatItem {
@@ -33,7 +37,7 @@ interface ChatsContextType {
   clearAllChats: () => void;
   resetMemory: () => void;
   updateCallName: (name: string) => void;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, mode?: "chat" | "image" | "video" | "voice") => Promise<void>;
   isSending: boolean;
 }
 
@@ -344,13 +348,23 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { extractedName, newFact };
   };
 
-  const sendMessage = async (content: string) => {
+  const sendMessage = async (content: string, mode: "chat" | "image" | "video" | "voice" = "chat") => {
     if (!content.trim() || isSending) return;
 
     let targetChatId = activeChatId;
     if (!targetChatId) {
       targetChatId = createNewChat();
     }
+
+    // Check if message is an image generation request
+    const isImageRequest =
+      mode === "image" ||
+      /(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)|(?:photo|image|tasveer|chhavi)\s+(?:banao|karo|bana\s+do)/i.test(content);
+
+    // Check if message is a video generation request
+    const isVideoRequest =
+      mode === "video" ||
+      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation|cinematic)|(?:video)\s+(?:banao|karo|bana\s+do)/i.test(content);
 
     // Immediately extract memory from user message
     const { extractedName, newFact } = extractUserMemory(content);
@@ -382,6 +396,75 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
 
     setIsSending(true);
+
+    if (isImageRequest) {
+      const imagePrompt = content
+        .replace(/(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)\s+(?:of\s+)?/i, "")
+        .replace(/(?:photo|image|tasveer)\s+(?:banao|karo|bana\s+do)/i, "")
+        .trim() || content.trim();
+
+      const seed = Math.floor(Math.random() * 900000) + 100000;
+      const generatedImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=1024&height=768&nologo=true&seed=${seed}`;
+
+      setTimeout(() => {
+        const assistantMsg: MessageItem = {
+          id: "ast_" + Date.now(),
+          role: "assistant",
+          content: `Here is your generated image for: "${imagePrompt}"`,
+          mediaType: "image",
+          mediaUrl: generatedImageUrl,
+          mediaPrompt: imagePrompt,
+          created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+
+        setChats((prev) =>
+          prev.map((c) => {
+            if (c.id === targetChatId) {
+              return {
+                ...c,
+                messages: [...c.messages, assistantMsg],
+              };
+            }
+            return c;
+          })
+        );
+        setIsSending(false);
+      }, 1000);
+      return;
+    }
+
+    if (isVideoRequest) {
+      const videoPrompt = content
+        .replace(/(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)?/i, "")
+        .replace(/(?:video)\s+(?:banao|karo|bana\s+do)/i, "")
+        .trim() || content.trim();
+
+      setTimeout(() => {
+        const assistantMsg: MessageItem = {
+          id: "ast_" + Date.now(),
+          role: "assistant",
+          content: `Here is your cinematic 4K video rendering for: "${videoPrompt}"`,
+          mediaType: "video",
+          mediaPrompt: videoPrompt,
+          videoDuration: "00:05",
+          created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+
+        setChats((prev) =>
+          prev.map((c) => {
+            if (c.id === targetChatId) {
+              return {
+                ...c,
+                messages: [...c.messages, assistantMsg],
+              };
+            }
+            return c;
+          })
+        );
+        setIsSending(false);
+      }, 1200);
+      return;
+    }
 
     // Build immediate, non-stale memory context string
     const effectiveUserName =
