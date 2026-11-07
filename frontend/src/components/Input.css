@@ -1,0 +1,74 @@
+.input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+}
+
+.input-label {
+  font-size: 0.82rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+.input-field-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.input-element {
+  width: 100%;
+  padding: 0.72rem 0.95rem;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 0.92rem;
+  color: var(--text-primary);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.input-element::placeholder {
+  color: var(--text-muted);
+}
+
+.input-element:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.input-action-btn {
+  position: absolute;
+  right: 0.65rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+.input-action-btn:hover {
+  color: var(--text-primary);
+}
+
+.has-error .input-element {
+  border-color: var(--danger);
+}
+.has-error .input-element:focus {
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.input-error-msg {
+  font-size: 0.78rem;
+  color: var(--danger);
+  margin-top: 0.15rem;
+}
+
+.input-hint-msg {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+

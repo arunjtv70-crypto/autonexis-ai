@@ -1,0 +1,93 @@
+/**
+ * AUTONEXIS Assistant - Design Tokens
+ * Philosophy: Minimal Premium. Calm, clean, spacious.
+ * No neon, no glow, no harsh gradients. Thin lines, muted warm gold accent.
+ */
+
+:root {
+  /* Common Geometry & Typography Tokens */
+  --font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans Devanagari", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  --transition-fast: 150ms ease;
+  --transition-normal: 220ms ease;
+
+  --max-chat-width: 800px;
+}
+
+/* Light Theme: Soft off-white (not pure white), deep charcoal text */
+:root[data-theme="light"] {
+  --bg: #F8F8FA;
+  --surface: #FFFFFF;
+  --surface-raised: #F2F1F4;
+  --border: rgba(24, 24, 27, 0.08);
+  --border-subtle: rgba(24, 24, 27, 0.05);
+  --border-focus: #BFA575;
+
+  --text-primary: #1C1C1F;
+  --text-secondary: #57575F;
+  --text-muted: #8E8E96;
+
+  /* Accent: Refined muted gold (used only for thin outlines, borders, focus rings) */
+  --accent: #B89A65;
+  --accent-soft: rgba(184, 154, 101, 0.10);
+  --accent-border: rgba(184, 154, 101, 0.35);
+
+  --user-bubble: #EFEFEA;
+  --assistant-bubble: transparent;
+
+  --danger: #B84747;
+  --danger-soft: rgba(184, 71, 71, 0.08);
+  --success: #357A57;
+
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.03), 0 4px 12px rgba(0, 0, 0, 0.02);
+  --watermark-opacity: 0.04;
+  --color-scheme: light;
+}
+
+/* Dark Theme: Very deep charcoal/near black background, soft white text */
+:root[data-theme="dark"] {
+  --bg: #0C0C0E;
+  --surface: #141417;
+  --surface-raised: #1A1A1E;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --border-focus: #CBB184;
+
+  --text-primary: #EDEDF0;
+  --text-secondary: #A0A0A8;
+  --text-muted: #6B6B73;
+
+  /* Accent: Refined muted gold (consistent family across themes) */
+  --accent: #CBB184;
+  --accent-soft: rgba(203, 177, 132, 0.10);
+  --accent-border: rgba(203, 177, 132, 0.35);
+
+  --user-bubble: #1E1E23;
+  --assistant-bubble: transparent;
+
+  --danger: #DF6565;
+  --danger-soft: rgba(223, 101, 101, 0.12);
+  --success: #4EAA7B;
+
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.25), 0 4px 16px rgba(0, 0, 0, 0.2);
+  --watermark-opacity: 0.035;
+  --color-scheme: dark;
+}
+
+/* Respect user's motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
