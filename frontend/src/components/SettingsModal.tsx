@@ -1,30 +1,31 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import {
   IconSearch,
   IconUser,
-  IconCreditCard,
   IconPalette,
   IconBrain,
   IconZap,
-  IconBell,
   IconShield,
-  IconHeart,
-  IconSliders,
-  IconCode,
   IconGlobe,
-  IconKey,
   IconHelpCircle,
-  IconCopy,
-  IconCheck,
-  IconExternalLink,
   IconTrash,
 } from "./Icons";
 import { useTheme, type ThemeChoice } from "../state/theme";
 import { useAuth } from "../state/auth";
 import { useChats } from "../state/chats";
 import type { SettingsTabId } from "./UserMenuDropdown";
+import {
+  apiListSessions,
+  apiDeleteSession,
+  apiRevokeAllSessions,
+  apiUpdateSettings,
+  apiDeleteAllUserChats,
+  apiDeleteAccount,
+  getOrCreateSessionId,
+  type SessionItem,
+} from "../api/settings";
 import "./SettingsModal.css";
 
 interface SettingsModalProps {
@@ -33,41 +34,72 @@ interface SettingsModalProps {
   initialTab?: SettingsTabId;
 }
 
+function formatRelativeTime(isoString?: string): string {
+  if (!isoString) return "Recently";
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  if (isNaN(diffMs) || diffMs < 0) return "Just now";
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "Just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} hr ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 30) return `${diffDays} days ago`;
+  return date.toLocaleDateString();
+}
+
+function formatSessionDate(isoString?: string): string {
+  if (!isoString) return "—";
+  try {
+    const d = new Date(isoString);
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return "—";
+  }
+}
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   initialTab = "account",
 }) => {
   const { theme, setTheme } = useTheme();
-  const { user, logout, updateProfileName } = useAuth();
+  const { user, firebaseUser, logout, updateProfileName } = useAuth();
   const { chats, memory, clearAllChats, resetMemory, updateCallName } = useChats();
 
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Whenever modal opens with a specific tab, switch to it
-  useEffect(() => {
-    if (isOpen) {
-      setActiveTab(initialTab);
-    }
-  }, [isOpen, initialTab]);
-
-  // Account Tab States
-  const [fullName, setFullName] = useState(user?.display_name || (user?.email ? user.email.split("@")[0] : "User"));
-  const [callName, setCallName] = useState(memory.userName || (user?.display_name ? user.display_name.split(" ")[0] : "Friend"));
-  const [workDesc, setWorkDesc] = useState(() => localStorage.getItem("autonexis_user_work") || "Engineering");
-  const [avatarUrl, setAvatarUrl] = useState(() => localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107");
-  const [orgId] = useState("42035f7c-bd9f-43b4-946a-1a7226bd2e91");
-  const [copiedOrgId, setCopiedOrgId] = useState(false);
+  // Account states
+  const [fullName, setFullName] = useState(
+    user?.display_name || (user?.email ? user.email.split("@")[0] : "User")
+  );
+  const [callName, setCallName] = useState(
+    memory.userName || (user?.display_name ? user.display_name.split(" ")[0] : "Friend")
+  );
+  const [avatarUrl, setAvatarUrl] = useState(
+    () => localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107"
+  );
   const [accountSaved, setAccountSaved] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (user?.display_name) {
-      setFullName(user.display_name);
-    }
-  }, [user]);
+  // Sessions state
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [loggingOutSessionId, setLoggingOutSessionId] = useState<string | null>(null);
+  const [revokingAll, setRevokingAll] = useState(false);
 
-  // Appearance Tab States
+  // Appearance states
   const [fontScale, setFontScale] = useState<"compact" | "standard" | "spacious">(
     () => (localStorage.getItem("autonexis_font_scale") as any) || "standard"
   );
@@ -75,14 +107,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     () => localStorage.getItem("autonexis_sound_enabled") === "true"
   );
 
-  // Memory & Personalization Tab States
+  // Memory states
   const [customInstructions, setCustomInstructions] = useState(
     () => localStorage.getItem("autonexis_custom_instructions") || ""
   );
   const [instructionsSaved, setInstructionsSaved] = useState(false);
   const [memoryResetDone, setMemoryResetDone] = useState(false);
 
-  // Capabilities States
+  // Capabilities states
   const [streamingEnabled, setStreamingEnabled] = useState(
     () => localStorage.getItem("autonexis_streaming") !== "false"
   );
@@ -90,53 +122,81 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     () => localStorage.getItem("autonexis_syntax_highlight") !== "false"
   );
 
-  // Notifications States
-  const [browserNotifications, setBrowserNotifications] = useState(
-    () => localStorage.getItem("autonexis_notifications") === "true"
-  );
-
-  // Language State
+  // Language state
   const [preferredLang, setPreferredLang] = useState(
     () => localStorage.getItem("autonexis_language") || "auto"
   );
 
-  // API Key State
-  const [customApiKey, setCustomApiKey] = useState(
-    () => localStorage.getItem("autonexis_custom_api_key") || ""
-  );
-  const [apiKeySaved, setApiKeySaved] = useState(false);
-
-  // Privacy States
+  // Privacy states
   const [exportNotice, setExportNotice] = useState(false);
   const [chatsClearedNotice, setChatsClearedNotice] = useState(false);
+  const [chatsClearing, setChatsClearing] = useState(false);
+  const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState("");
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
 
-  // Wellbeing States
-  const [breakReminders, setBreakReminders] = useState(
-    () => localStorage.getItem("autonexis_wellbeing_breaks") === "true"
-  );
+  const currentSessionId = getOrCreateSessionId();
 
-  // Save Account Changes
-  const handleSaveAccount = (e?: React.FormEvent) => {
+  // Switch tab on external initialTab change
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
+
+  // Keep full name synced with user
+  useEffect(() => {
+    if (user?.display_name) {
+      setFullName(user.display_name);
+    }
+  }, [user?.display_name]);
+
+  // Load real sessions when modal opens or activeTab is 'account'
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    setSessionsError(null);
+    try {
+      const list = await apiListSessions();
+      setSessions(list);
+    } catch {
+      setSessionsError("Unable to load active sessions right now. Please try again later.");
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isOpen && activeTab === "account") {
+      loadSessions();
+    }
+  }, [isOpen, activeTab, loadSessions]);
+
+  // Save Account Profile
+  const handleSaveAccount = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (fullName.trim()) {
-      updateProfileName(fullName.trim());
+    setAccountSaving(true);
+    setAccountError(null);
+    try {
+      const cleanName = fullName.trim();
+      if (cleanName) {
+        await updateProfileName(cleanName);
+        await apiUpdateSettings(cleanName, theme);
+      }
+      if (callName.trim()) {
+        updateCallName(callName.trim());
+        localStorage.setItem("autonexis_user_callname", callName.trim());
+      }
+      setAccountSaved(true);
+      setTimeout(() => setAccountSaved(false), 2500);
+    } catch {
+      setAccountError("Failed to save changes. Please check your connection and try again.");
+    } finally {
+      setAccountSaving(false);
     }
-    if (callName.trim()) {
-      updateCallName(callName.trim());
-      localStorage.setItem("autonexis_user_callname", callName.trim());
-    }
-    localStorage.setItem("autonexis_user_work", workDesc);
-    setAccountSaved(true);
-    setTimeout(() => setAccountSaved(false), 2500);
   };
 
-  const handleCopyOrgId = () => {
-    navigator.clipboard.writeText(orgId);
-    setCopiedOrgId(true);
-    setTimeout(() => setCopiedOrgId(false), 2000);
-  };
-
-  // Avatar Upload / Simulation
+  // Avatar change
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -150,12 +210,62 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  // Export Chats as JSON
+  // Terminate a single non-current session
+  const handleLogoutSession = async (sessionId: string) => {
+    setLoggingOutSessionId(sessionId);
+    try {
+      const ok = await apiDeleteSession(sessionId);
+      if (ok) {
+        setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+      }
+    } catch {
+      // friendly silent fail
+    } finally {
+      setLoggingOutSessionId(null);
+    }
+  };
+
+  // Revoke all sessions
+  const handleRevokeAllSessions = async () => {
+    if (
+      !window.confirm(
+        "Are you sure you want to log out of all devices? This will invalidate all active sessions and return you to the sign-in screen."
+      )
+    ) {
+      return;
+    }
+    setRevokingAll(true);
+    try {
+      await apiRevokeAllSessions();
+    } catch {
+      // Proceed to sign out locally
+    } finally {
+      setRevokingAll(false);
+      onClose();
+      await logout();
+    }
+  };
+
+  // Theme update
+  const handleThemeChange = async (t: ThemeChoice) => {
+    setTheme(t);
+    try {
+      await apiUpdateSettings(fullName.trim() || undefined, t);
+    } catch {
+      // Best-effort backend sync
+    }
+  };
+
+  // Export chats as JSON
   const handleExportChats = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chats, null, 2));
+    const dataStr =
+      "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chats, null, 2));
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `autonexis_chats_export_${new Date().toISOString().slice(0, 10)}.json`);
+    downloadAnchor.setAttribute(
+      "download",
+      `autonexis_chats_export_${new Date().toISOString().slice(0, 10)}.json`
+    );
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -163,7 +273,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTimeout(() => setExportNotice(false), 2500);
   };
 
-  // Export Chats as Readable TXT
+  // Export chats as Text
   const handleExportText = () => {
     let output = `AUTONEXIS Assistant - Chat History Export\nGenerated: ${new Date().toLocaleString()}\n=========================================\n\n`;
     for (const chat of chats) {
@@ -176,7 +286,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const dataStr = "data:text/plain;charset=utf-8," + encodeURIComponent(output);
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `autonexis_chats_${new Date().toISOString().slice(0, 10)}.txt`);
+    downloadAnchor.setAttribute(
+      "download",
+      `autonexis_chats_${new Date().toISOString().slice(0, 10)}.txt`
+    );
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -184,18 +297,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTimeout(() => setExportNotice(false), 2500);
   };
 
-  // Clear Chats
-  const handleClearAllChats = () => {
-    if (window.confirm("Are you sure you want to clear all chat histories? This cannot be undone.")) {
+  // Clear all chats
+  const handleClearAllChats = async () => {
+    if (
+      !window.confirm(
+        "Are you sure you want to permanently delete all your chats? This action cannot be undone."
+      )
+    ) {
+      return;
+    }
+    setChatsClearing(true);
+    try {
+      await apiDeleteAllUserChats();
       clearAllChats();
       setChatsClearedNotice(true);
       setTimeout(() => setChatsClearedNotice(false), 2500);
+    } catch {
+      alert("Unable to delete chats at this time. Please try again.");
+    } finally {
+      setChatsClearing(false);
+    }
+  };
+
+  // Delete account
+  const handleConfirmDeleteAccount = async () => {
+    if (deleteConfirmationText.trim() !== "DELETE") {
+      setDeleteAccountError('Please type "DELETE" exactly to confirm.');
+      return;
+    }
+    setIsDeletingAccount(true);
+    setDeleteAccountError(null);
+    try {
+      const ok = await apiDeleteAccount();
+      if (!ok) {
+        throw new Error("Deletion failed");
+      }
+      setShowDeleteAccountModal(false);
+      onClose();
+      await logout();
+    } catch {
+      setDeleteAccountError(
+        "Unable to delete account right now. For security, you may need to log in again and retry."
+      );
+    } finally {
+      setIsDeletingAccount(false);
     }
   };
 
   // Reset Memory
   const handleResetMemory = () => {
-    if (window.confirm("Are you sure you want to reset all AI memory and forgotten facts?")) {
+    if (window.confirm("Are you sure you want to reset all AI memory and stored facts?")) {
       resetMemory();
       setMemoryResetDone(true);
       setTimeout(() => setMemoryResetDone(false), 2500);
@@ -209,27 +360,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTimeout(() => setInstructionsSaved(false), 2000);
   };
 
-  // Save API Key
-  const handleSaveApiKey = () => {
-    localStorage.setItem("autonexis_custom_api_key", customApiKey.trim());
-    setApiKeySaved(true);
-    setTimeout(() => setApiKeySaved(false), 2000);
-  };
+  // Login method detection
+  const loginMethod = (() => {
+    const providerId = firebaseUser?.providerData?.[0]?.providerId;
+    if (providerId === "google.com") return "Google Account";
+    if (providerId === "password") return "Email & Password";
+    return "Email";
+  })();
 
-  // Navigation Items matching Image 2
+  // Navigation Items
   const navItems = [
     { id: "account" as SettingsTabId, label: "Account", icon: <IconUser size={16} />, category: "General" },
-    { id: "billing" as SettingsTabId, label: "Billing", icon: <IconCreditCard size={16} />, category: "General" },
     { id: "appearance" as SettingsTabId, label: "Appearance", icon: <IconPalette size={16} />, category: "Preferences" },
     { id: "your_autonexis" as SettingsTabId, label: "Your Autonexis", icon: <IconBrain size={16} />, category: "Preferences" },
     { id: "capabilities" as SettingsTabId, label: "Capabilities", icon: <IconZap size={16} />, category: "Preferences" },
-    { id: "notifications" as SettingsTabId, label: "Notifications", icon: <IconBell size={16} />, category: "Preferences" },
     { id: "privacy" as SettingsTabId, label: "Privacy", icon: <IconShield size={16} />, category: "Preferences" },
-    { id: "wellbeing" as SettingsTabId, label: "Wellbeing", icon: <IconHeart size={16} />, category: "Preferences" },
-    { id: "customize" as SettingsTabId, label: "Customize", icon: <IconSliders size={16} />, category: "Advanced" },
-    { id: "code" as SettingsTabId, label: "Code", icon: <IconCode size={16} />, category: "Advanced" },
     { id: "language" as SettingsTabId, label: "Language", icon: <IconGlobe size={16} />, category: "Advanced" },
-    { id: "apikeys" as SettingsTabId, label: "API keys", icon: <IconKey size={16} />, category: "Advanced" },
   ];
 
   const filteredNav = searchQuery.trim()
@@ -313,7 +459,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {item.icon}
                     <span>{item.label}</span>
                   </div>
-                  {item.id === "apikeys" && <IconExternalLink size={13} className="user-menu-arrow" />}
                 </button>
               ))}
             </div>
@@ -322,7 +467,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="settings-sidebar-bottom">
             <button
               type="button"
-              className="settings-nav-btn"
+              className={`settings-nav-btn ${activeTab === "help" ? "active" : ""}`}
               onClick={() => setActiveTab("help")}
             >
               <div className="settings-nav-btn-left">
@@ -335,7 +480,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Right Main Content Panel */}
         <main className="settings-main">
-          {/* TAB 1: ACCOUNT (Matches Image 2 exactly) */}
+          {/* TAB 1: ACCOUNT */}
           {activeTab === "account" && (
             <div>
               <h2 className="settings-pane-title">Profile</h2>
@@ -344,13 +489,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="settings-profile-photo-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Profile photo</span>
-                  <span className="settings-item-desc">PNG, JPEG, or WebP, up to 10MB.</span>
+                  <span className="settings-item-desc">Personalize your avatar in conversations.</span>
                 </div>
                 <div className="settings-avatar-wrapper">
                   <img src={avatarUrl} alt="Avatar" className="settings-avatar-img" />
                   <label className="settings-avatar-upload-btn">
                     Change
-                    <input type="file" accept="image/*" onChange={handleAvatarChange} style={{ display: "none" }} />
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleAvatarChange}
+                      style={{ display: "none" }}
+                    />
                   </label>
                 </div>
               </div>
@@ -359,6 +509,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Full name</span>
+                  <span className="settings-item-desc">Your display name across the workspace.</span>
                 </div>
                 <input
                   type="text"
@@ -369,163 +520,167 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
-              {/* Email address */}
+              {/* Email address (Read-only) */}
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Email address</span>
-                  <span className="settings-item-desc">Your authenticated Firebase account email.</span>
+                  <span className="settings-item-desc">Authenticated account address.</span>
                 </div>
                 <input
                   type="text"
                   className="settings-input-control"
-                  value={user?.email || "Signed in"}
+                  value={user?.email || firebaseUser?.email || "Signed in"}
                   disabled
                   style={{ opacity: 0.7, cursor: "not-allowed" }}
                 />
               </div>
 
-              {/* What should Autonexis call you? */}
+              {/* Sign-in Method */}
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Sign-in method</span>
+                  <span className="settings-item-desc">Authentication method used for this account.</span>
+                </div>
+                <div className="settings-provider-badge">
+                  {loginMethod}
+                </div>
+              </div>
+
+              {/* Preferred Call Name */}
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">What should Autonexis call you?</span>
-                  <span className="settings-item-desc">Your preferred name remembered across all conversations.</span>
+                  <span className="settings-item-desc">
+                    Your preferred name remembered in conversations.
+                  </span>
                 </div>
                 <input
                   type="text"
                   className="settings-input-control"
                   value={callName}
                   onChange={(e) => setCallName(e.target.value)}
-                  placeholder="e.g. Arun"
+                  placeholder="e.g. Alex"
                 />
               </div>
 
-              {/* What best describes your work? */}
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <span className="settings-item-title">What best describes your work?</span>
-                </div>
-                <select
-                  className="settings-select-control"
-                  value={workDesc}
-                  onChange={(e) => setWorkDesc(e.target.value)}
-                >
-                  <option value="Engineering">Engineering</option>
-                  <option value="Software Development">Software Development</option>
-                  <option value="Product & Design">Product & Design</option>
-                  <option value="Marketing & Sales">Marketing & Sales</option>
-                  <option value="Business & Founder">Business & Founder</option>
-                  <option value="Student & Research">Student & Research</option>
-                  <option value="Healthcare">Healthcare</option>
-                  <option value="Content Creator">Content Creator</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-
-              {/* Organization ID */}
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <span className="settings-item-title">Organization ID</span>
-                </div>
-                <button type="button" className="settings-copy-pill" onClick={handleCopyOrgId} title="Click to copy">
-                  <span>{orgId}</span>
-                  {copiedOrgId ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                </button>
-              </div>
-
-              {/* Save Account Button */}
+              {/* Save Profile Button */}
               <div style={{ padding: "1rem 0", display: "flex", gap: "10px", alignItems: "center" }}>
-                <Button variant="primary" size="md" onClick={() => handleSaveAccount()}>
-                  {accountSaved ? "Changes Saved!" : "Save Profile Changes"}
+                <Button
+                  variant="primary"
+                  size="md"
+                  onClick={() => handleSaveAccount()}
+                  disabled={accountSaving}
+                >
+                  {accountSaving
+                    ? "Saving..."
+                    : accountSaved
+                    ? "Changes Saved!"
+                    : "Save Profile Changes"}
                 </Button>
-                {accountSaved && <span style={{ color: "var(--accent)", fontSize: "0.85rem" }}>✓ Profile & AI Memory updated</span>}
+                {accountSaved && (
+                  <span style={{ color: "var(--accent)", fontSize: "0.85rem" }}>
+                    ✓ Profile updated successfully
+                  </span>
+                )}
+                {accountError && (
+                  <span style={{ color: "var(--danger, #ef4444)", fontSize: "0.85rem" }}>
+                    {accountError}
+                  </span>
+                )}
               </div>
 
               {/* Where you're logged in */}
               <div className="settings-devices-section">
                 <div className="settings-devices-header">
                   <span className="settings-item-title">Where you're logged in</span>
-                  <Button variant="outline" size="sm" onClick={() => logout()}>
-                    Log out of all devices
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRevokeAllSessions}
+                    disabled={revokingAll}
+                  >
+                    {revokingAll ? "Logging out..." : "Log out of all devices"}
                   </Button>
                 </div>
 
-                <table className="settings-devices-table">
-                  <thead>
-                    <tr>
-                      <th>Device</th>
-                      <th>Location</th>
-                      <th>Signed in</th>
-                      <th>Last active</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        Chrome (Windows)
-                        <span className="device-current-badge">Current</span>
-                      </td>
-                      <td>Madhya Pradesh, India</td>
-                      <td>Oct 1, 2026, 10:18 AM</td>
-                      <td>Nov 7, 2026, 9:29 AM</td>
-                    </tr>
-                    <tr>
-                      <td>Android (PWA App)</td>
-                      <td>Madhya Pradesh, India</td>
-                      <td>Sep 21, 2026, 3:15 PM</td>
-                      <td>Nov 3, 2026, 3:55 PM</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+                {sessionsLoading ? (
+                  <div style={{ padding: "0.5rem 0" }}>
+                    <div className="settings-skeleton-row" />
+                    <div className="settings-skeleton-row" />
+                  </div>
+                ) : sessionsError ? (
+                  <div style={{ padding: "0.8rem 0", color: "var(--text-muted)", fontSize: "0.84rem" }}>
+                    {sessionsError}
+                  </div>
+                ) : (
+                  <table className="settings-devices-table">
+                    <thead>
+                      <tr>
+                        <th>Device</th>
+                        <th>Location</th>
+                        <th>Signed in</th>
+                        <th>Last active</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sessions.map((s) => {
+                        const isCurrent = s.session_id === currentSessionId;
+                        const deviceName = `${s.browser || "Browser"} on ${
+                          s.device || s.os || "Device"
+                        }`;
+                        const locationStr =
+                          [s.city, s.region, s.country].filter(Boolean).join(", ") ||
+                          s.location ||
+                          "Local Network";
 
-              {/* Trusted devices */}
-              <div style={{ padding: "1rem 0" }}>
-                <div className="settings-item-title">Trusted devices</div>
-                <div className="settings-item-desc" style={{ marginBottom: "0.5rem" }}>
-                  Devices that can control your assistant remotely.
-                </div>
-                <span style={{ fontSize: "0.84rem", color: "var(--text-muted)" }}>No trusted devices.</span>
+                        return (
+                          <tr key={s.session_id}>
+                            <td>
+                              {deviceName}
+                              {isCurrent && (
+                                <span className="device-current-badge">Current</span>
+                              )}
+                            </td>
+                            <td>{locationStr}</td>
+                            <td>{formatSessionDate(s.created_at)}</td>
+                            <td>{formatRelativeTime(s.last_active)}</td>
+                            <td>
+                              {isCurrent ? (
+                                <span style={{ fontSize: "0.74rem", color: "var(--text-muted)" }}>
+                                  This device
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="device-logout-btn"
+                                  onClick={() => handleLogoutSession(s.session_id)}
+                                  disabled={loggingOutSessionId === s.session_id}
+                                >
+                                  {loggingOutSessionId === s.session_id
+                                    ? "Logging out..."
+                                    : "Log out"}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {sessions.length === 0 && (
+                        <tr>
+                          <td colSpan={5} style={{ textAlign: "center", color: "var(--text-muted)" }}>
+                            No active sessions found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           )}
 
-          {/* TAB 2: BILLING */}
-          {activeTab === "billing" && (
-            <div>
-              <h2 className="settings-pane-title">Billing & Plans</h2>
-
-              <div className="settings-plan-card" style={{ marginBottom: "1.2rem" }}>
-                <div className="settings-plan-badge">Current Active Plan</div>
-                <div style={{ fontSize: "1.1rem", fontWeight: 500, color: "var(--text-primary)" }}>
-                  AUTONEXIS Standard (Free Tier)
-                </div>
-                <div className="settings-item-desc">
-                  Includes full access to AUTONEXIS Assistant, persistent cross-chat memory, PWA install, and unlimited chats.
-                </div>
-              </div>
-
-              <div className="settings-plan-card" style={{ borderColor: "var(--accent)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ fontSize: "1.2rem", fontWeight: 500, color: "var(--text-primary)" }}>
-                    AUTONEXIS Pro
-                  </div>
-                  <div style={{ fontSize: "1.1rem", color: "var(--accent)", fontWeight: 500 }}>
-                    ₹1,499 <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>/ month</span>
-                  </div>
-                </div>
-                <div className="settings-item-desc">
-                  Accelerated inference, extended 128k context window, priority token streaming, and team collaboration.
-                </div>
-                <div style={{ marginTop: "0.5rem" }}>
-                  <Button variant="primary" size="md">
-                    Upgrade to Pro Plan
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: APPEARANCE */}
+          {/* TAB 2: APPEARANCE */}
           {activeTab === "appearance" && (
             <div>
               <h2 className="settings-pane-title">Appearance</h2>
@@ -533,7 +688,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Theme</span>
-                  <span className="settings-item-desc">Select Light, Dark, or follow system theme.</span>
+                  <span className="settings-item-desc">
+                    Select Light, Dark, or automatically match your system appearance.
+                  </span>
                 </div>
                 <div style={{ display: "flex", gap: "6px" }}>
                   {(["light", "dark", "auto"] as ThemeChoice[]).map((t) => (
@@ -541,8 +698,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       key={t}
                       type="button"
                       className={`settings-avatar-upload-btn ${theme === t ? "active" : ""}`}
-                      style={theme === t ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}}
-                      onClick={() => setTheme(t)}
+                      style={
+                        theme === t
+                          ? { borderColor: "var(--accent)", color: "var(--accent)" }
+                          : {}
+                      }
+                      onClick={() => handleThemeChange(t)}
                     >
                       {t.toUpperCase()}
                     </button>
@@ -590,7 +751,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 4: YOUR AUTONEXIS (Memory & Personalization) */}
+          {/* TAB 3: YOUR AUTONEXIS (Memory & Personalization) */}
           {activeTab === "your_autonexis" && (
             <div>
               <h2 className="settings-pane-title">Your Autonexis & Memory</h2>
@@ -602,7 +763,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </span>
                 <textarea
                   className="settings-textarea-control"
-                  placeholder="e.g. Talk concisely, answer in Hindi or Hinglish, explain code with real-world examples..."
+                  placeholder="e.g. Talk concisely, explain code with real-world examples..."
                   value={customInstructions}
                   onChange={(e) => setCustomInstructions(e.target.value)}
                 />
@@ -617,7 +778,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div>
                     <span className="settings-item-title">Active AI Memory Inspector</span>
-                    <div className="settings-item-desc">Facts AUTONEXIS has permanently retained about you across chats:</div>
+                    <div className="settings-item-desc">
+                      Facts AUTONEXIS has retained about you across chats:
+                    </div>
                   </div>
                   <Button variant="outline" size="sm" onClick={handleResetMemory}>
                     <IconTrash size={14} /> Clear Memory
@@ -625,27 +788,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
 
                 <div className="settings-facts-grid">
-                  <div className="settings-fact-chip" style={{ borderColor: "var(--accent)", color: "var(--accent)" }}>
-                    👤 Call Name: {memory.userName || "Arun"}
+                  <div
+                    className="settings-fact-chip"
+                    style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
+                  >
+                    👤 Call Name: {memory.userName || fullName || "User"}
                   </div>
-                  <div className="settings-fact-chip">💼 Work: {workDesc}</div>
                   {memory.facts.map((fact, idx) => (
                     <div key={idx} className="settings-fact-chip">
                       📌 {fact}
                     </div>
                   ))}
                   {memory.facts.length === 0 && (
-                    <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "6px" }}>
+                    <span
+                      style={{
+                        fontSize: "0.8rem",
+                        color: "var(--text-muted)",
+                        marginTop: "6px",
+                      }}
+                    >
                       No additional facts recorded yet. Chat naturally to build your assistant's memory.
                     </span>
                   )}
                 </div>
-                {memoryResetDone && <span style={{ color: "var(--accent)", fontSize: "0.82rem", marginTop: "6px" }}>✓ Memory has been reset.</span>}
+                {memoryResetDone && (
+                  <span
+                    style={{
+                      color: "var(--accent)",
+                      fontSize: "0.82rem",
+                      marginTop: "6px",
+                    }}
+                  >
+                    ✓ Memory has been reset.
+                  </span>
+                )}
               </div>
             </div>
           )}
 
-          {/* TAB 5: CAPABILITIES */}
+          {/* TAB 4: CAPABILITIES */}
           {activeTab === "capabilities" && (
             <div>
               <h2 className="settings-pane-title">Capabilities</h2>
@@ -653,7 +834,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Real-Time Token Streaming</span>
-                  <span className="settings-item-desc">Stream assistant responses word-by-word with ultra-low latency.</span>
+                  <span className="settings-item-desc">Stream assistant responses word-by-word with low latency.</span>
                 </div>
                 <label className="settings-switch-label">
                   <input
@@ -688,41 +869,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 6: NOTIFICATIONS */}
-          {activeTab === "notifications" && (
-            <div>
-              <h2 className="settings-pane-title">Notifications</h2>
-
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <span className="settings-item-title">Desktop & Browser Notifications</span>
-                  <span className="settings-item-desc">Notify when long background tasks or responses complete.</span>
-                </div>
-                <label className="settings-switch-label">
-                  <input
-                    type="checkbox"
-                    checked={browserNotifications}
-                    onChange={async (e) => {
-                      const enabled = e.target.checked;
-                      if (enabled && "Notification" in window) {
-                        const perm = await Notification.requestPermission();
-                        if (perm !== "granted") return;
-                      }
-                      setBrowserNotifications(enabled);
-                      localStorage.setItem("autonexis_notifications", String(enabled));
-                    }}
-                  />
-                  <span className="settings-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 7: PRIVACY & DATA */}
+          {/* TAB 5: PRIVACY & DATA */}
           {activeTab === "privacy" && (
             <div>
               <h2 className="settings-pane-title">Privacy & Data Management</h2>
 
+              {/* Export chats */}
               <div className="settings-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">Export Chat History</span>
@@ -737,87 +889,122 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </Button>
                 </div>
               </div>
-              {exportNotice && <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>✓ Export initiated!</span>}
+              {exportNotice && (
+                <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>
+                  ✓ Export initiated!
+                </span>
+              )}
 
+              {/* Delete all chats */}
               <div className="settings-row">
                 <div className="settings-row-info">
-                  <span className="settings-item-title" style={{ color: "var(--danger)" }}>Clear All Conversations</span>
-                  <span className="settings-item-desc">Permanently wipe all chats from local storage and start fresh.</span>
+                  <span className="settings-item-title" style={{ color: "var(--danger, #ef4444)" }}>
+                    Clear All Conversations
+                  </span>
+                  <span className="settings-item-desc">
+                    Permanently delete all your chats from the server and local storage.
+                  </span>
                 </div>
-                <Button variant="outline" size="sm" onClick={handleClearAllChats} style={{ color: "var(--danger)", borderColor: "var(--danger-soft)" }}>
-                  Clear History
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleClearAllChats}
+                  disabled={chatsClearing}
+                  style={{
+                    color: "var(--danger, #ef4444)",
+                    borderColor: "rgba(239, 68, 68, 0.4)",
+                  }}
+                >
+                  {chatsClearing ? "Clearing..." : "Clear History"}
                 </Button>
               </div>
-              {chatsClearedNotice && <span style={{ color: "var(--danger)", fontSize: "0.82rem" }}>✓ All chats cleared!</span>}
-            </div>
-          )}
+              {chatsClearedNotice && (
+                <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>
+                  ✓ All chats permanently deleted!
+                </span>
+              )}
 
-          {/* TAB 8: WELLBEING */}
-          {activeTab === "wellbeing" && (
-            <div>
-              <h2 className="settings-pane-title">Wellbeing & Ergonomics</h2>
-
+              {/* Delete account */}
               <div className="settings-row">
                 <div className="settings-row-info">
-                  <span className="settings-item-title">Break Reminders</span>
-                  <span className="settings-item-desc">Gentle notification to rest your eyes after 45 minutes of continuous work.</span>
+                  <span className="settings-item-title" style={{ color: "var(--danger, #ef4444)" }}>
+                    Delete Account
+                  </span>
+                  <span className="settings-item-desc">
+                    Permanently delete your profile, chats, active sessions, and account credentials.
+                  </span>
                 </div>
-                <label className="settings-switch-label">
-                  <input
-                    type="checkbox"
-                    checked={breakReminders}
-                    onChange={(e) => {
-                      setBreakReminders(e.target.checked);
-                      localStorage.setItem("autonexis_wellbeing_breaks", String(e.target.checked));
-                    }}
-                  />
-                  <span className="settings-switch-slider"></span>
-                </label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowDeleteAccountModal(!showDeleteAccountModal)}
+                  style={{
+                    color: "var(--danger, #ef4444)",
+                    borderColor: "rgba(239, 68, 68, 0.4)",
+                  }}
+                >
+                  Delete Account
+                </Button>
               </div>
-            </div>
-          )}
 
-          {/* TAB 9: CUSTOMIZE */}
-          {activeTab === "customize" && (
-            <div>
-              <h2 className="settings-pane-title">Customize Assistant</h2>
-              <div className="settings-row-col">
-                <span className="settings-item-title">Assistant Personality Style</span>
-                <span className="settings-item-desc">Select how AUTONEXIS responds to your prompts:</span>
-                <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
-                  {["Warm & Empathetic", "Direct & Concise", "Deep & Technical"].map((style) => (
-                    <button
-                      key={style}
-                      type="button"
-                      className="settings-avatar-upload-btn"
-                      onClick={() => alert(`Personality style set to: ${style}`)}
+              {/* Strong confirmation for delete account */}
+              {showDeleteAccountModal && (
+                <div className="settings-confirm-delete-box">
+                  <div style={{ fontSize: "0.88rem", fontWeight: 500, color: "var(--text-primary)" }}>
+                    Confirm Permanent Account Deletion
+                  </div>
+                  <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", lineHeight: 1.4 }}>
+                    This action is permanent and cannot be reversed. All chats, active sessions, preferences, and your login will be completely erased.
+                    <br />
+                    To confirm, please type <strong>DELETE</strong> in uppercase below:
+                  </div>
+                  <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      className="settings-confirm-delete-input"
+                      placeholder="Type DELETE"
+                      value={deleteConfirmationText}
+                      onChange={(e) => {
+                        setDeleteConfirmationText(e.target.value);
+                        setDeleteAccountError(null);
+                      }}
+                    />
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleConfirmDeleteAccount}
+                      disabled={deleteConfirmationText.trim() !== "DELETE" || isDeletingAccount}
+                      style={{
+                        backgroundColor: "var(--danger, #ef4444)",
+                        borderColor: "var(--danger, #ef4444)",
+                        color: "#fff",
+                      }}
                     >
-                      {style}
-                    </button>
-                  ))}
+                      {isDeletingAccount ? "Deleting..." : "Permanently Delete"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setShowDeleteAccountModal(false);
+                        setDeleteConfirmationText("");
+                        setDeleteAccountError(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                  {deleteAccountError && (
+                    <span style={{ color: "var(--danger, #ef4444)", fontSize: "0.82rem" }}>
+                      {deleteAccountError}
+                    </span>
+                  )}
                 </div>
-              </div>
+              )}
             </div>
           )}
 
-          {/* TAB 10: CODE */}
-          {activeTab === "code" && (
-            <div>
-              <h2 className="settings-pane-title">Code Preferences</h2>
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <span className="settings-item-title">Show Line Numbers in Code Snippets</span>
-                  <span className="settings-item-desc">Display row markers beside code blocks.</span>
-                </div>
-                <label className="settings-switch-label">
-                  <input type="checkbox" defaultChecked />
-                  <span className="settings-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 11: LANGUAGE */}
+          {/* TAB 6: LANGUAGE */}
           {activeTab === "language" && (
             <div>
               <h2 className="settings-pane-title">Language Preferences</h2>
@@ -843,36 +1030,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 12: API KEYS */}
-          {activeTab === "apikeys" && (
-            <div>
-              <h2 className="settings-pane-title">API Keys Configuration</h2>
-              <div className="settings-row-col">
-                <span className="settings-item-title">Bring Your Own Key (Optional)</span>
-                <span className="settings-item-desc">
-                  Override default compute with your own private OpenAI or Groq API key:
-                </span>
-                <input
-                  type="password"
-                  className="settings-input-control"
-                  style={{ maxWidth: "480px" }}
-                  placeholder="gsk_... or sk-..."
-                  value={customApiKey}
-                  onChange={(e) => setCustomApiKey(e.target.value)}
-                />
-                <div style={{ marginTop: "10px", display: "flex", gap: "8px" }}>
-                  <Button variant="primary" size="sm" onClick={handleSaveApiKey}>
-                    {apiKeySaved ? "Key Saved!" : "Save Key"}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => alert("Connecting to endpoint... Live verification active.")}>
-                    Test Connection
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 13: HELP */}
+          {/* TAB 7: HELP */}
           {activeTab === "help" && (
             <div>
               <h2 className="settings-pane-title">Help & Shortcuts</h2>
@@ -886,15 +1044,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <tbody>
                   <tr>
                     <td>Open Settings Dialog</td>
-                    <td><kbd style={{ padding: "2px 6px", background: "var(--surface-raised)", border: "1px solid var(--border-subtle)", borderRadius: "4px" }}>Ctrl + Shift + ,</kbd></td>
+                    <td>
+                      <kbd
+                        style={{
+                          padding: "2px 6px",
+                          background: "var(--surface-raised)",
+                          border: "1px solid var(--border-subtle)",
+                          borderRadius: "4px",
+                        }}
+                      >
+                        Ctrl + Shift + ,
+                      </kbd>
+                    </td>
                   </tr>
                   <tr>
                     <td>Send Message</td>
-                    <td><kbd style={{ padding: "2px 6px", background: "var(--surface-raised)", border: "1px solid var(--border-subtle)", borderRadius: "4px" }}>Enter</kbd></td>
+                    <td>
+                      <kbd
+                        style={{
+                          padding: "2px 6px",
+                          background: "var(--surface-raised)",
+                          border: "1px solid var(--border-subtle)",
+                          borderRadius: "4px",
+                        }}
+                      >
+                        Enter
+                      </kbd>
+                    </td>
                   </tr>
                   <tr>
                     <td>Add New Line in Chat</td>
-                    <td><kbd style={{ padding: "2px 6px", background: "var(--surface-raised)", border: "1px solid var(--border-subtle)", borderRadius: "4px" }}>Shift + Enter</kbd></td>
+                    <td>
+                      <kbd
+                        style={{
+                          padding: "2px 6px",
+                          background: "var(--surface-raised)",
+                          border: "1px solid var(--border-subtle)",
+                          borderRadius: "4px",
+                        }}
+                      >
+                        Shift + Enter
+                      </kbd>
+                    </td>
                   </tr>
                 </tbody>
               </table>

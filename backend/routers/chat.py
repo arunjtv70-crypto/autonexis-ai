@@ -108,7 +108,7 @@ async def get_chat_details(
         ]
     }
 
-# 4. Delete chat
+# 4. Delete single chat
 @router.delete("/{chat_id}")
 async def delete_chat(
     chat_id: str,
@@ -126,6 +126,22 @@ async def delete_chat(
     await db.commit()
 
     return {"status": "success", "message": "बातचीत सफलतापूर्वक हटा दी गई।"}
+
+# 4b. Delete all chats of this user
+@router.delete("")
+async def delete_all_user_chats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Permanently deletes all chats and messages belonging to this user."""
+    stmt = select(Chat).where(Chat.user_id == current_user.id)
+    result = await db.execute(stmt)
+    chats = result.scalars().all()
+    for c in chats:
+        await db.delete(c)
+    await db.commit()
+
+    return {"status": "success", "message": "All conversations have been deleted."}
 
 # 5. Send message & get LLM response (with complete past conversation context)
 @router.post("/{chat_id}/message")

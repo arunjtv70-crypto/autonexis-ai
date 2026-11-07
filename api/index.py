@@ -14,10 +14,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
-from database import init_db, User
+from database import init_db, User, get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 from auth_utils import get_current_user
 from llm_client import llm_client
-from routers import auth, chat
+from routers import auth, chat, sessions, account
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -42,9 +43,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include Authentication & Chat Routers
+# Include Authentication, Chat, Sessions & Account Routers
 app.include_router(auth.router)
 app.include_router(chat.router)
+app.include_router(sessions.router)
+app.include_router(account.router)
+
+@app.delete("/chats")
+async def delete_chats_top_level(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy import select
+    from database import Chat
+    stmt = select(Chat).where(Chat.user_id == current_user.id)
+    result = await db.execute(stmt)
+    chats = result.scalars().all()
+    for c in chats:
+        await db.delete(c)
+    await db.commit()
+    return {"status": "success", "message": "All conversations have been deleted."}
 
 class MessageItem(BaseModel):
     role: str = Field(..., description="Role of the sender (user, assistant)")

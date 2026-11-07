@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -21,8 +22,9 @@ class Settings(BaseSettings):
     llm_model: str = "openai/gpt-oss-120b"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
-    # Firebase Authentication
+    # Firebase Authentication & Firestore
     firebase_project_id: str = "autonexis-ai"
+    firebase_service_account_json: Optional[str] = None
 
     # Security & Session
     jwt_secret: str = "autonexis_super_secret_jwt_key_2026_change_in_prod"

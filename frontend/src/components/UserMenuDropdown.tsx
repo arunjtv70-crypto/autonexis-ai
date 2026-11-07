@@ -3,29 +3,18 @@ import {
   IconSettings,
   IconGlobe,
   IconHelpCircle,
-  IconUpgrade,
   IconDevice,
-  IconInfo,
-  IconKey,
   IconLogout,
-  IconChevronRight,
-  IconExternalLink,
 } from "./Icons";
 import "./UserMenuDropdown.css";
 
 export type SettingsTabId =
   | "account"
-  | "billing"
   | "appearance"
   | "your_autonexis"
   | "capabilities"
-  | "notifications"
   | "privacy"
-  | "wellbeing"
-  | "customize"
-  | "code"
   | "language"
-  | "apikeys"
   | "help";
 
 interface UserMenuDropdownProps {
@@ -117,21 +106,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
           </div>
         </button>
 
-        {/* Upgrade Plan */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            onOpenSettings("billing");
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconUpgrade size={17} />
-            <span>Upgrade plan</span>
-          </div>
-        </button>
-
         {/* Get apps and extensions */}
         <button
           type="button"
@@ -149,40 +123,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
             <IconDevice size={17} />
             <span>Get apps and extensions</span>
           </div>
-        </button>
-
-        {/* Learn more */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            onOpenSettings("customize");
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconInfo size={17} />
-            <span>Learn more</span>
-          </div>
-          <IconChevronRight size={14} className="user-menu-arrow" />
-        </button>
-
-        <div className="user-menu-divider" />
-
-        {/* Get API keys */}
-        <button
-          type="button"
-          className="user-menu-item"
-          onClick={() => {
-            onClose();
-            onOpenSettings("apikeys");
-          }}
-        >
-          <div className="user-menu-item-left">
-            <IconKey size={17} />
-            <span>Get API keys</span>
-          </div>
-          <IconExternalLink size={14} className="user-menu-arrow" />
         </button>
 
         <div className="user-menu-divider" />

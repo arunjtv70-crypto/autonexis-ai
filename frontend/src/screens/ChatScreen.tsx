@@ -438,19 +438,7 @@ export const ChatScreen: React.FC = () => {
             </button>
           </div>
 
-          <div className="topbar-center">
-            <div
-              className="topbar-plan-pill"
-              onClick={() => {
-                setSettingsTab("billing");
-                setIsSettingsOpen(true);
-              }}
-              title="View Plan Details"
-            >
-              <span>Free plan ·</span>
-              <span className="topbar-upgrade-link">Upgrade</span>
-            </div>
-          </div>
+          <div className="topbar-center" />
 
           <div className="topbar-right">
             {/* Auto-Voice Readout (TTS) Toggle */}

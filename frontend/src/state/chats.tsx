@@ -122,7 +122,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (stored) {
         const parsed = JSON.parse(stored);
         return {
-          userName: parsed.userName || (user?.display_name && user.display_name !== "User" && user.display_name !== "Guest User" && user.display_name !== "Google User" ? user.display_name : "Arun"),
+          userName: parsed.userName || (user?.display_name && user.display_name !== "User" ? user.display_name : "User"),
           facts: Array.isArray(parsed.facts) ? parsed.facts : [],
         };
       }
@@ -130,7 +130,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // Ignore
     }
     return {
-      userName: user?.display_name && user.display_name !== "User" && user.display_name !== "Guest User" && user.display_name !== "Google User" ? user.display_name : "Arun",
+      userName: user?.display_name && user.display_name !== "User" ? user.display_name : "User",
       facts: [],
     };
   });
@@ -246,7 +246,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const resetMemory = () => {
     const freshMemory: UserMemoryStore = {
-      userName: "Arun",
+      userName: user?.display_name && user.display_name !== "User" ? user.display_name : "User",
       facts: [],
     };
     setMemory(freshMemory);
@@ -470,7 +470,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const effectiveUserName =
       extractedName ||
       memory.userName ||
-      (user?.display_name && user?.display_name !== "User" && user?.display_name !== "Guest User" ? user.display_name : "Arun");
+      (user?.display_name && user?.display_name !== "User" ? user.display_name : "User");
 
     // Gather facts from current memory and scan across all past chats
     const pastFacts = extractAllFactsFromChats(chats);

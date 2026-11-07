@@ -14,6 +14,7 @@ import {
 } from "firebase/auth";
 import { auth, googleProvider } from "../firebase";
 import { apiUpdateProfile, type UserResponse } from "../api/auth";
+import { apiRegisterSession, apiGetSettings } from "../api/settings";
 
 export function formatFirebaseAuthError(error: any): string {
   const code = error?.code || "";
@@ -103,6 +104,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(mapped);
       setToken(idToken);
       setIsAuthScreenVisible(false);
+
+      // Register current session and load preferences from backend
+      apiRegisterSession().catch((err) => console.warn("[AUTONEXIS] Session register note:", err));
+      apiGetSettings().then((settings) => {
+        if (settings?.display_name) {
+          setUser((prev) => prev ? {
+            ...prev,
+            display_name: settings.display_name,
+            theme_preference: (settings.theme as any) || prev.theme_preference,
+          } : null);
+        }
+      }).catch(() => {});
     } catch (err) {
       console.error("[AUTONEXIS] Failed to extract token:", err);
       setUser(null);

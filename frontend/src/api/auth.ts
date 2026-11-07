@@ -36,7 +36,7 @@ export async function apiUpdateProfile(
     const currentUser = auth.currentUser;
     if (!currentUser) return { success: false, error: "Not authenticated" };
     const token = await currentUser.getIdToken();
-    const res = await fetch(`${API_BASE_URL}/auth/profile`, {
+    const res = await fetch(`${API_BASE_URL}/settings`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -44,7 +44,7 @@ export async function apiUpdateProfile(
       },
       body: JSON.stringify({
         display_name: name,
-        theme_preference: theme,
+        theme: theme,
       }),
     });
 
@@ -53,7 +53,16 @@ export async function apiUpdateProfile(
       return { success: false, error: data.detail || "Failed to update profile." };
     }
 
-    return { success: true, user: data.user };
+    return {
+      success: true,
+      user: {
+        id: currentUser.uid,
+        email: currentUser.email,
+        phone: currentUser.phoneNumber,
+        display_name: data.display_name || name || "User",
+        theme_preference: data.theme || (theme as any) || "auto",
+      },
+    };
   } catch {
     return { success: false, error: "Network error: Unable to connect to server." };
   }

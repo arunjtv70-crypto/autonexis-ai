@@ -425,6 +425,72 @@ input:checked + .settings-switch-slider:before {
   color: var(--text-secondary);
 }
 
+.device-logout-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.74rem;
+  background-color: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.device-logout-btn:hover {
+  border-color: var(--danger, #ef4444);
+  color: var(--danger, #ef4444);
+}
+
+.settings-provider-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.35rem 0.8rem;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.settings-skeleton-row {
+  height: 38px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-raised) 25%, var(--border-subtle) 50%, var(--surface-raised) 75%);
+  background-size: 200% 100%;
+  animation: settings-shimmer 1.6s infinite ease-in-out;
+  margin: 6px 0;
+}
+
+@keyframes settings-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.settings-confirm-delete-box {
+  margin-top: 1rem;
+  padding: 1.2rem;
+  border-radius: var(--radius-md);
+  background-color: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.settings-confirm-delete-input {
+  max-width: 240px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.86rem;
+  font-family: monospace;
+  background-color: var(--surface);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  outline: none;
+}
+
 /* Mobile Responsiveness */
 @media (max-width: 720px) {
   .settings-modal-dialog {
