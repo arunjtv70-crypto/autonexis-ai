@@ -17,9 +17,24 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500&family=Noto+Sans+Devanagari:wght@300;400;500&display=swap" rel="stylesheet" />
 
-    <!-- Anti-flash inline script before first paint -->
+    <!-- Anti-cache & Anti-flash inline script before first paint -->
     <script>
       (function() {
+        // Immediate cleanup of old Service Worker caches to prevent stale blank screen
+        try {
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+              for (var i = 0; i < regs.length; i++) { regs[i].unregister(); }
+            });
+          }
+          if ('caches' in window) {
+            caches.keys().then(function(keys) {
+              for (var j = 0; j < keys.length; j++) { caches.delete(keys[j]); }
+            });
+          }
+        } catch (e) {}
+
+        // Theme restoration
         try {
           var saved = localStorage.getItem('autonexis_theme');
           var resolved = saved;

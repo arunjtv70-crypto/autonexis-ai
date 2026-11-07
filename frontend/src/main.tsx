@@ -18,11 +18,11 @@ createRoot(document.getElementById("root")!).render(
   </StrictMode>
 );
 
-// Register PWA service worker
-if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register("/sw.js")
-      .catch((err) => console.log("SW registration notice:", err));
+// Clean up any existing Service Worker to prevent stale caching issues
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const registration of registrations) {
+      registration.unregister();
+    }
   });
 }
