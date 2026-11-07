@@ -1,16 +1,15 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { useAuth } from "../state/auth";
 import { Logo } from "../components/Logo";
 import { Button } from "../components/Button";
 import { Input } from "../components/Input";
-import { OtpInput } from "../components/OtpInput";
 import { IconGoogle } from "../components/Icons";
 import "./AuthScreen.css";
 
 type AuthTab = "email" | "phone";
 
 export const AuthScreen: React.FC = () => {
-  const { loginEmail, signupEmail, loginGoogle, sendOtp, verifyOtp, loginAsGuest, isLoading } = useAuth();
+  const { loginEmail, signupEmail, loginGoogle, sendPasswordReset, isLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<AuthTab>("email");
   const [isSignUp, setIsSignUp] = useState<boolean>(false);
@@ -20,48 +19,52 @@ export const AuthScreen: React.FC = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // Phone OTP state
-  const [phone, setPhone] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otp, setOtp] = useState("");
-  const [resendTimer, setResendTimer] = useState(0);
-
   // Feedback messages
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
-
-  // Countdown timer for OTP resend
-  useEffect(() => {
-    let interval: any = null;
-    if (resendTimer > 0) {
-      interval = setInterval(() => {
-        setResendTimer((prev) => prev - 1);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [resendTimer]);
 
   const clearMessages = () => {
     setErrorMsg(null);
     setInfoMsg(null);
   };
 
-  // Handle Email submission
+  // Handle Email submission (Signup or Login)
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
 
     if (!email || !password) {
-      setErrorMsg("Please fill in all required fields.");
+      setErrorMsg("Please enter both email and password.");
       return;
     }
 
     if (isSignUp) {
       const res = await signupEmail(name, email, password);
-      if (!res.success) setErrorMsg(res.error || "Sign up failed. Please try again.");
+      if (!res.success) {
+        setErrorMsg(res.error || "Sign up failed. Please try again.");
+      } else if (res.message) {
+        setInfoMsg(res.message);
+      }
     } else {
       const res = await loginEmail(email, password);
-      if (!res.success) setErrorMsg(res.error || "Invalid email or password.");
+      if (!res.success) {
+        setErrorMsg(res.error || "Invalid email or password.");
+      }
+    }
+  };
+
+  // Handle Forgot Password
+  const handleForgotPassword = async () => {
+    clearMessages();
+    if (!email || !email.trim()) {
+      setErrorMsg("Please enter your email address in the field above to reset your password.");
+      return;
+    }
+    const res = await sendPasswordReset(email);
+    if (!res.success) {
+      setErrorMsg(res.error || "Failed to send reset email.");
+    } else {
+      setInfoMsg(res.message || "Password reset instructions have been sent to your email.");
     }
   };
 
@@ -69,36 +72,8 @@ export const AuthScreen: React.FC = () => {
   const handleGoogleLogin = async () => {
     clearMessages();
     const res = await loginGoogle();
-    if (!res.success) setErrorMsg(res.error || "Google sign-in was canceled.");
-  };
-
-  // Handle Phone OTP Request
-  const handleSendOtp = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    clearMessages();
-
-    const digitsOnly = phone.replace(/[^0-9]/g, "");
-    if (digitsOnly.length < 10) {
-      setErrorMsg("Please enter a valid 10-digit mobile number.");
-      return;
-    }
-
-    const res = await sendOtp(phone);
-    if (res.success) {
-      setOtpSent(true);
-      setResendTimer(30);
-      setInfoMsg(`A 6-digit verification code has been sent. (Test Code: ${res.devOtp || "811011"})`);
-    } else {
-      setErrorMsg(res.error || "Failed to dispatch verification code.");
-    }
-  };
-
-  // Handle OTP Verification
-  const handleVerifyOtp = async (otpToVerify: string) => {
-    clearMessages();
-    const res = await verifyOtp(phone, otpToVerify);
     if (!res.success) {
-      setErrorMsg(res.error || "Invalid verification code. Please try again.");
+      setErrorMsg(res.error || "Google sign-in was canceled.");
     }
   };
 
@@ -136,7 +111,7 @@ export const AuthScreen: React.FC = () => {
             role="tab"
             aria-selected={activeTab === "phone"}
           >
-            Mobile OTP
+            Mobile OTP <span className="auth-coming-soon-badge">Soon</span>
           </button>
         </div>
 
@@ -186,6 +161,19 @@ export const AuthScreen: React.FC = () => {
               required
             />
 
+            {!isSignUp && (
+              <div className="auth-row-between">
+                <button
+                  type="button"
+                  className="forgot-password-link"
+                  onClick={handleForgotPassword}
+                  disabled={isLoading}
+                >
+                  Forgot password?
+                </button>
+              </div>
+            )}
+
             <Button
               type="submit"
               variant="primary"
@@ -211,83 +199,21 @@ export const AuthScreen: React.FC = () => {
           </form>
         )}
 
-        {/* TAB 2: MOBILE NUMBER & OTP */}
+        {/* TAB 2: MOBILE NUMBER & OTP (Coming Soon) */}
         {activeTab === "phone" && (
-          <div className="auth-form">
-            {!otpSent ? (
-              <form onSubmit={handleSendOtp} className="phone-step-form">
-                <div className="phone-input-group">
-                  <div className="country-code-pill">+91 (India)</div>
-                  <Input
-                    type="tel"
-                    placeholder="98765 43210"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    disabled={isLoading}
-                    autoFocus
-                  />
-                </div>
-
-                <Button
-                  type="submit"
-                  variant="primary"
-                  size="lg"
-                  fullWidth
-                  isLoading={isLoading}
-                >
-                  Send OTP
-                </Button>
-              </form>
-            ) : (
-              <div className="otp-step-wrap">
-                <div className="otp-info">
-                  <p>Code sent to <strong>+91 {phone}</strong></p>
-                  <button
-                    type="button"
-                    className="edit-phone-btn"
-                    onClick={() => { setOtpSent(false); setOtp(""); clearMessages(); }}
-                  >
-                    Change number
-                  </button>
-                </div>
-
-                <OtpInput
-                  value={otp}
-                  onChange={(val) => { setOtp(val); clearMessages(); }}
-                  onComplete={handleVerifyOtp}
-                  disabled={isLoading}
-                />
-
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="lg"
-                  fullWidth
-                  disabled={otp.length !== 6 || isLoading}
-                  isLoading={isLoading}
-                  onClick={() => handleVerifyOtp(otp)}
-                >
-                  Verify & Continue
-                </Button>
-
-                <div className="resend-row">
-                  {resendTimer > 0 ? (
-                    <span className="resend-timer-text">
-                      Resend code in {resendTimer}s
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="resend-btn"
-                      onClick={() => handleSendOtp()}
-                      disabled={isLoading}
-                    >
-                      Resend OTP
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
+          <div className="auth-coming-soon-card">
+            <p className="coming-soon-title">Mobile OTP is coming soon</p>
+            <p className="coming-soon-desc">
+              Direct phone number verification will be available soon. Please continue with your Email or Google account in the meantime.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="md"
+              onClick={() => { setActiveTab("email"); clearMessages(); }}
+            >
+              Continue with Email
+            </Button>
           </div>
         )}
 
@@ -309,17 +235,6 @@ export const AuthScreen: React.FC = () => {
           <IconGoogle size={18} />
           <span>Continue with Google</span>
         </Button>
-
-        {/* Guest Preview */}
-        <div className="guest-action-wrap">
-          <button
-            type="button"
-            className="guest-preview-btn"
-            onClick={loginAsGuest}
-          >
-            Explore as Guest →
-          </button>
-        </div>
 
         {/* Footer */}
         <footer className="auth-footer-note">

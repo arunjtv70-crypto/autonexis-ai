@@ -14,12 +14,12 @@ def utcnow():
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(128), primary_key=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     phone = Column(String(30), unique=True, nullable=True, index=True)
     google_sub = Column(String(255), unique=True, nullable=True, index=True)
     hashed_password = Column(String(255), nullable=True)
-    display_name = Column(String(100), default="ऑटोनेक्सिस यूज़र")
+    display_name = Column(String(100), default="AUTONEXIS User")
     theme_preference = Column(String(20), default="auto")  # 'light', 'dark', 'auto'
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -29,8 +29,8 @@ class User(Base):
 class Chat(Base):
     __tablename__ = "chats"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(128), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String(255), default="नई बातचीत")
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

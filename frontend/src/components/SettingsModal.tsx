@@ -53,13 +53,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [isOpen, initialTab]);
 
   // Account Tab States
-  const [fullName, setFullName] = useState(user?.display_name || "Arun ambedkar34");
-  const [callName, setCallName] = useState(memory.userName || "Arun");
+  const [fullName, setFullName] = useState(user?.display_name || (user?.email ? user.email.split("@")[0] : "User"));
+  const [callName, setCallName] = useState(memory.userName || (user?.display_name ? user.display_name.split(" ")[0] : "Friend"));
   const [workDesc, setWorkDesc] = useState(() => localStorage.getItem("autonexis_user_work") || "Engineering");
   const [avatarUrl, setAvatarUrl] = useState(() => localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107");
   const [orgId] = useState("42035f7c-bd9f-43b4-946a-1a7226bd2e91");
   const [copiedOrgId, setCopiedOrgId] = useState(false);
   const [accountSaved, setAccountSaved] = useState(false);
+
+  useEffect(() => {
+    if (user?.display_name) {
+      setFullName(user.display_name);
+    }
+  }, [user]);
 
   // Appearance Tab States
   const [fontScale, setFontScale] = useState<"compact" | "standard" | "spacious">(
@@ -360,6 +366,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
                   placeholder="Your full name"
+                />
+              </div>
+
+              {/* Email address */}
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Email address</span>
+                  <span className="settings-item-desc">Your authenticated Firebase account email.</span>
+                </div>
+                <input
+                  type="text"
+                  className="settings-input-control"
+                  value={user?.email || "Signed in"}
+                  disabled
+                  style={{ opacity: 0.7, cursor: "not-allowed" }}
                 />
               </div>
 

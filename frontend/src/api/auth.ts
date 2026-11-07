@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "../config";
+import { auth } from "../firebase";
 
 export interface UserResponse {
   id: string;
@@ -9,162 +10,32 @@ export interface UserResponse {
   created_at?: string;
 }
 
-export interface AuthResult {
-  success: boolean;
-  token?: string;
-  user?: UserResponse;
-  error?: string;
-}
-
-export async function apiRegisterEmail(
-  email: string,
-  pass: string,
-  name?: string
-): Promise<AuthResult> {
+export async function apiGetMyProfile(): Promise<UserResponse | null> {
   try {
-    const res = await fetch(`${API_BASE_URL}/auth/register-email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: email.trim(),
-        password: pass,
-        display_name: name?.trim() || "User",
-      }),
+    const currentUser = auth.currentUser;
+    if (!currentUser) return null;
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE_URL}/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     });
-
+    if (!res.ok) return null;
     const data = await res.json();
-    if (!res.ok) {
-      return { success: false, error: data.detail || "Registration failed." };
-    }
-
-    return {
-      success: true,
-      token: data.token,
-      user: data.user,
-    };
-  } catch (err: any) {
-    return { success: false, error: "Network error: Unable to connect to server." };
-  }
-}
-
-export async function apiLoginEmail(
-  email: string,
-  pass: string
-): Promise<AuthResult> {
-  try {
-    const res = await fetch(`${API_BASE_URL}/auth/login-email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: email.trim(),
-        password: pass,
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      return { success: false, error: data.detail || "Invalid email or password." };
-    }
-
-    return {
-      success: true,
-      token: data.token,
-      user: data.user,
-    };
-  } catch (err: any) {
-    return { success: false, error: "Network error: Unable to connect to server." };
-  }
-}
-
-export async function apiLoginGoogle(mockEmail?: string): Promise<AuthResult> {
-  try {
-    const email = mockEmail || "user@autonexis.com";
-    const rawName = email.split("@")[0].replace(/[0-9._-]+/g, " ").trim();
-    const cleanName = rawName ? rawName.charAt(0).toUpperCase() + rawName.slice(1) : "Friend";
-    const res = await fetch(`${API_BASE_URL}/auth/google`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id_token: "mock_google_id_token",
-        email: email,
-        display_name: cleanName,
-        sub: `google_${Date.now()}`,
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      return { success: false, error: data.detail || "Google authentication failed." };
-    }
-
-    return {
-      success: true,
-      token: data.token,
-      user: data.user,
-    };
-  } catch (err: any) {
-    return { success: false, error: "Network error: Unable to connect to server." };
-  }
-}
-
-export async function apiSendOtp(phone: string): Promise<{ success: boolean; error?: string; devOtp?: string }> {
-  try {
-    const cleanPhone = phone.trim().replace(/[^0-9]/g, "");
-    const res = await fetch(`${API_BASE_URL}/auth/phone/send-otp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        phone: cleanPhone.startsWith("91") ? `+${cleanPhone}` : `+91${cleanPhone}`,
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      return { success: false, error: data.detail || "Failed to send OTP." };
-    }
-
-    return {
-      success: true,
-      devOtp: data.dev_otp,
-    };
-  } catch (err: any) {
-    return { success: false, error: "Network error: Unable to connect to server." };
-  }
-}
-
-export async function apiVerifyOtp(phone: string, otp: string): Promise<AuthResult> {
-  try {
-    const cleanPhone = phone.trim().replace(/[^0-9]/g, "");
-    const res = await fetch(`${API_BASE_URL}/auth/phone/verify-otp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        phone: cleanPhone.startsWith("91") ? `+${cleanPhone}` : `+91${cleanPhone}`,
-        otp: otp.trim(),
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      return { success: false, error: data.detail || "Invalid OTP code." };
-    }
-
-    return {
-      success: true,
-      token: data.token,
-      user: data.user,
-    };
-  } catch (err: any) {
-    return { success: false, error: "Network error: Unable to connect to server." };
+    return data.user;
+  } catch {
+    return null;
   }
 }
 
 export async function apiUpdateProfile(
-  token: string,
   name?: string,
   theme?: string
 ): Promise<{ success: boolean; user?: UserResponse; error?: string }> {
   try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) return { success: false, error: "Not authenticated" };
+    const token = await currentUser.getIdToken();
     const res = await fetch(`${API_BASE_URL}/auth/profile`, {
       method: "PUT",
       headers: {
@@ -183,8 +54,7 @@ export async function apiUpdateProfile(
     }
 
     return { success: true, user: data.user };
-  } catch (err: any) {
-    return { success: false, error: "Network error." };
+  } catch {
+    return { success: false, error: "Network error: Unable to connect to server." };
   }
 }
-

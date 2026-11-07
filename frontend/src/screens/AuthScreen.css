@@ -196,20 +196,66 @@
   gap: 0.75rem;
 }
 
-/* Guest Action */
-.guest-action-wrap {
-  text-align: center;
-  margin-top: 1.25rem;
+/* Forgot Password Link */
+.auth-row-between {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -0.35rem;
+  margin-bottom: 0.25rem;
 }
 
-.guest-preview-btn {
-  font-size: 0.84rem;
-  letter-spacing: 0.02em;
+.forgot-password-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.8rem;
   color: var(--text-secondary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
   transition: color var(--transition-fast);
 }
-.guest-preview-btn:hover {
+
+.forgot-password-link:hover {
   color: var(--accent);
+}
+
+.auth-coming-soon-badge {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-full);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  margin-left: 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.auth-coming-soon-card {
+  padding: 1.75rem 1rem;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.coming-soon-title {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.coming-soon-desc {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  max-width: 320px;
 }
 
 .auth-footer-note {

@@ -77,11 +77,10 @@ export const ChatScreen: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Determine user display name for greeting: saved memory > user account > fallback
+  // Determine user display name: Firebase User account > fallback
   const userName =
-    memory.userName ||
     user?.display_name ||
-    (user?.email ? user.email.split("@")[0] : "Arun_ambedkar34");
+    (user?.email ? user.email.split("@")[0].replace(/[._-]+/g, " ").trim() : (memory.userName || "User"));
 
   // Global Ctrl+Shift+, Keyboard Shortcut for Settings & Ctrl+Shift+O for New Chat
   useEffect(() => {
@@ -392,7 +391,7 @@ export const ChatScreen: React.FC = () => {
         <UserMenuDropdown
           isOpen={isUserMenuOpen}
           onClose={() => setIsUserMenuOpen(false)}
-          userEmail={user?.email || (isGuest ? "guest@autonexis.ai" : "arunjtv70@gmail.com")}
+          userEmail={user?.email || "Account"}
           onOpenSettings={(tab) => {
             setSettingsTab(tab || "account");
             setIsSettingsOpen(true);

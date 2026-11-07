@@ -7,14 +7,15 @@ if backend_dir not in sys.path:
 
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
-from database import init_db
+from database import init_db, User
+from auth_utils import get_current_user
 from llm_client import llm_client
 from routers import auth, chat
 
@@ -63,8 +64,11 @@ async def health_check():
     }
 
 @app.post("/api/chat")
-async def chat_direct(req: DirectChatRequest):
-    """Direct chat endpoint."""
+async def chat_direct(
+    req: DirectChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Direct chat endpoint protected with Firebase Auth."""
     if not req.messages:
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
     
@@ -73,8 +77,11 @@ async def chat_direct(req: DirectChatRequest):
     return result
 
 @app.post("/api/chat/stream")
-async def chat_stream_endpoint(req: DirectChatRequest):
-    """Real-time streaming chat endpoint using SSE."""
+async def chat_stream_endpoint(
+    req: DirectChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Real-time streaming chat endpoint protected with Firebase Auth."""
     if not req.messages:
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
 

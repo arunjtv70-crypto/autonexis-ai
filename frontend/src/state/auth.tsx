@@ -1,16 +1,56 @@
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useEffect } from "react";
 import {
-  apiRegisterEmail,
-  apiLoginEmail,
-  apiLoginGoogle,
-  apiSendOtp,
-  apiVerifyOtp,
-  apiUpdateProfile,
-  type UserResponse,
-} from "../api/auth";
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signOut,
+  updateProfile,
+  type User as FirebaseUser,
+} from "firebase/auth";
+import { auth, googleProvider } from "../firebase";
+import { apiUpdateProfile, type UserResponse } from "../api/auth";
+
+export function formatFirebaseAuthError(error: any): string {
+  const code = error?.code || "";
+  switch (code) {
+    case "auth/invalid-email":
+      return "Please enter a valid email address.";
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+    case "auth/invalid-credential":
+      return "Incorrect email or password. Please try again.";
+    case "auth/email-already-in-use":
+      return "An account with this email already exists. Please log in instead.";
+    case "auth/weak-password":
+      return "Password should be at least 6 characters long.";
+    case "auth/popup-closed-by-user":
+      return "Sign-in was cancelled before completion.";
+    case "auth/popup-blocked":
+      return "Sign-in popup was blocked by your browser. Redirecting instead...";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait a few moments and try again.";
+    case "auth/network-request-failed":
+      return "Network connection issue. Please check your internet and try again.";
+    case "auth/user-disabled":
+      return "This account has been disabled. Please contact support.";
+    case "auth/operation-not-allowed":
+      return "Authentication provider is not enabled in your project settings.";
+    default:
+      if (typeof error?.message === "string" && !error.message.includes("Firebase:")) {
+        return error.message;
+      }
+      return "An authentication error occurred. Please try again.";
+  }
+}
 
 interface AuthContextType {
   user: UserResponse | null;
+  firebaseUser: FirebaseUser | null;
   token: string | null;
   isAuthenticated: boolean;
   isGuest: boolean;
@@ -18,173 +58,221 @@ interface AuthContextType {
   setIsAuthScreenVisible: (visible: boolean) => void;
   isLoading: boolean;
   loginEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
-  signupEmail: (name: string, email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
-  loginGoogle: (mockEmail?: string) => Promise<{ success: boolean; error?: string }>;
-  sendOtp: (phone: string) => Promise<{ success: boolean; devOtp?: string; error?: string }>;
-  verifyOtp: (phone: string, otp: string) => Promise<{ success: boolean; error?: string }>;
-  loginAsGuest: () => void;
-  logout: () => void;
+  signupEmail: (name: string, email: string, pass: string) => Promise<{ success: boolean; error?: string; message?: string }>;
+  loginGoogle: () => Promise<{ success: boolean; error?: string }>;
+  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string; message?: string }>;
+  logout: () => Promise<void>;
   updateProfileName: (name: string) => Promise<void>;
 }
-
-const AUTH_TOKEN_KEY = "autonexis_auth_token";
-const AUTH_USER_KEY = "autonexis_auth_user";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [token, setToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(AUTH_TOKEN_KEY);
-    } catch {
-      return null;
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<UserResponse | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isAuthScreenVisible, setIsAuthScreenVisible] = useState<boolean>(false);
+
+  // Sync Firebase User to UserResponse format
+  const syncUser = async (fbUser: FirebaseUser | null) => {
+    if (!fbUser) {
+      setFirebaseUser(null);
+      setUser(null);
+      setToken(null);
+      setIsAuthScreenVisible(true);
+      return;
     }
-  });
 
-  const [user, setUser] = useState<UserResponse | null>(() => {
     try {
-      const stored = localStorage.getItem(AUTH_USER_KEY);
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+      const idToken = await fbUser.getIdToken();
+      const rawName = fbUser.displayName;
+      const email = fbUser.email || "";
+      const derivedName = rawName || (email ? email.split("@")[0].replace(/[._-]+/g, " ").trim() : "User");
+      const cleanName = derivedName ? derivedName.charAt(0).toUpperCase() + derivedName.slice(1) : "User";
 
-  // Default: if no real user token is saved, display Auth screen first
-  const [isAuthScreenVisible, setIsAuthScreenVisible] = useState<boolean>(() => {
-    const existing = localStorage.getItem(AUTH_TOKEN_KEY);
-    return !existing || existing === "mock_jwt_guest";
-  });
+      const mapped: UserResponse = {
+        id: fbUser.uid,
+        email: fbUser.email,
+        phone: fbUser.phoneNumber,
+        display_name: cleanName,
+        theme_preference: "auto",
+      };
 
-  const [isGuest, setIsGuest] = useState<boolean>(() => {
-    const existing = localStorage.getItem(AUTH_TOKEN_KEY);
-    return existing === "mock_jwt_guest";
-  });
-
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-
-  const saveSession = (newToken: string, newUser: UserResponse, asGuest: boolean = false) => {
-    setToken(newToken);
-    setUser(newUser);
-    setIsGuest(asGuest);
-    setIsAuthScreenVisible(false);
-    try {
-      localStorage.setItem(AUTH_TOKEN_KEY, newToken);
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(newUser));
-    } catch {
-      // Storage error
-    }
-  };
-
-  const logout = () => {
-    setToken(null);
-    setUser(null);
-    setIsGuest(false);
-    setIsAuthScreenVisible(true);
-    try {
-      localStorage.removeItem(AUTH_TOKEN_KEY);
-      localStorage.removeItem(AUTH_USER_KEY);
-    } catch {
-      // Storage error
+      setFirebaseUser(fbUser);
+      setUser(mapped);
+      setToken(idToken);
+      setIsAuthScreenVisible(false);
+    } catch (err) {
+      console.error("[AUTONEXIS] Failed to extract token:", err);
+      setUser(null);
+      setToken(null);
+      setIsAuthScreenVisible(true);
     }
   };
 
-  // 1. Real Email Registration via FastAPI Backend
+  // 1. Listen to real Firebase Auth State
+  useEffect(() => {
+    setIsLoading(true);
+
+    // Check redirect result for mobile devices
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          syncUser(result.user);
+        }
+      })
+      .catch((err) => {
+        console.warn("[AUTONEXIS] Redirect auth note:", err);
+      });
+
+    const unsubscribe = onAuthStateChanged(auth, async (current) => {
+      await syncUser(current);
+      setIsLoading(false);
+    });
+
+    // Handle global 401 unauthorized event
+    const handleUnauthorizedEvent = () => {
+      signOut(auth).catch(() => {});
+      setUser(null);
+      setToken(null);
+      setIsAuthScreenVisible(true);
+    };
+    window.addEventListener("autonexis:unauthorized", handleUnauthorizedEvent);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener("autonexis:unauthorized", handleUnauthorizedEvent);
+    };
+  }, []);
+
+  // 2. Email + Password Signup with Verification Email
   const signupEmail = async (name: string, email: string, pass: string) => {
     setIsLoading(true);
     try {
-      const res = await apiRegisterEmail(email, pass, name);
-      if (!res.success || !res.token || !res.user) {
-        return { success: false, error: res.error || "Authentication failed." };
+      const cleanEmail = email.trim();
+      const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+      
+      if (name.trim()) {
+        try {
+          await updateProfile(userCredential.user, { displayName: name.trim() });
+        } catch {
+          // Non-blocking
+        }
       }
-      saveSession(res.token, res.user, false);
-      return { success: true };
+
+      // Send verification email
+      try {
+        await sendEmailVerification(userCredential.user);
+      } catch (err) {
+        console.warn("[AUTONEXIS] Verification email note:", err);
+      }
+
+      await syncUser(userCredential.user);
+      return {
+        success: true,
+        message: "Account created successfully. A verification link has been sent to your email. Please check your inbox.",
+      };
+    } catch (err: any) {
+      return { success: false, error: formatFirebaseAuthError(err) };
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 2. Real Email Login via FastAPI Backend
+  // 3. Email + Password Login
   const loginEmail = async (email: string, pass: string) => {
     setIsLoading(true);
     try {
-      const res = await apiLoginEmail(email, pass);
-      if (!res.success || !res.token || !res.user) {
-        return { success: false, error: res.error || "Authentication failed." };
-      }
-      saveSession(res.token, res.user, false);
+      const cleanEmail = email.trim();
+      const userCredential = await signInWithEmailAndPassword(auth, cleanEmail, pass);
+      await syncUser(userCredential.user);
       return { success: true };
+    } catch (err: any) {
+      return { success: false, error: formatFirebaseAuthError(err) };
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 3. Real Google Login
-  const loginGoogle = async (mockEmail?: string) => {
+  // 4. Google Login with Popup and Redirect Fallback
+  const loginGoogle = async () => {
     setIsLoading(true);
     try {
-      const res = await apiLoginGoogle(mockEmail);
-      if (!res.success || !res.token || !res.user) {
-        return { success: false, error: res.error || "Authentication failed." };
-      }
-      saveSession(res.token, res.user, false);
+      const result = await signInWithPopup(auth, googleProvider);
+      await syncUser(result.user);
       return { success: true };
+    } catch (err: any) {
+      if (err?.code === "auth/popup-blocked") {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return { success: true };
+        } catch (redirectErr: any) {
+          return { success: false, error: formatFirebaseAuthError(redirectErr) };
+        }
+      }
+      return { success: false, error: formatFirebaseAuthError(err) };
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 4. Real Phone OTP Send via FastAPI Backend
-  const sendOtp = async (phone: string) => {
+  // 5. Password Reset Email
+  const sendPasswordReset = async (email: string) => {
+    if (!email || !email.trim()) {
+      return { success: false, error: "Please enter your email address first." };
+    }
     setIsLoading(true);
     try {
-      const res = await apiSendOtp(phone);
-      if (!res.success) {
-        return { success: false, error: res.error };
-      }
-      return { success: true, devOtp: res.devOtp };
+      await sendPasswordResetEmail(auth, email.trim());
+      return {
+        success: true,
+        message: "Password reset instructions have been sent to your email.",
+      };
+    } catch (err: any) {
+      return { success: false, error: formatFirebaseAuthError(err) };
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 5. Real Phone OTP Verify via FastAPI Backend
-  const verifyOtp = async (phone: string, otp: string) => {
+  // 6. Sign Out
+  const logout = async () => {
     setIsLoading(true);
     try {
-      const res = await apiVerifyOtp(phone, otp);
-      if (!res.success || !res.token || !res.user) {
-        return { success: false, error: res.error || "Authentication failed." };
-      }
-      saveSession(res.token, res.user, false);
-      return { success: true };
+      await signOut(auth);
+    } catch (err) {
+      console.error("[AUTONEXIS] Logout error:", err);
     } finally {
+      setUser(null);
+      setFirebaseUser(null);
+      setToken(null);
+      setIsAuthScreenVisible(true);
       setIsLoading(false);
     }
   };
 
-  // 6. Guest Mode
-  const loginAsGuest = () => {
-    const guestUser: UserResponse = {
-      id: "usr_guest",
-      display_name: "Guest",
-      theme_preference: "auto",
-    };
-    saveSession("mock_jwt_guest", guestUser, true);
-  };
-
-  // 7. Real Profile Update
+  // 7. Update Profile Name
   const updateProfileName = async (name: string) => {
-    if (!user) return;
-    const updated = { ...user, display_name: name };
-    setUser(updated);
-    try {
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(updated));
-      if (token && token !== "mock_jwt_guest") {
-        await apiUpdateProfile(token, name);
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    if (auth.currentUser) {
+      try {
+        await updateProfile(auth.currentUser, { displayName: trimmed });
+      } catch (err) {
+        console.warn("[AUTONEXIS] Profile name update note:", err);
       }
+    }
+
+    if (user) {
+      setUser({ ...user, display_name: trimmed });
+    }
+
+    try {
+      await apiUpdateProfile(trimmed);
     } catch {
-      // Ignore
+      // Best-effort backend sync
     }
   };
 
@@ -192,18 +280,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         user,
+        firebaseUser,
         token,
-        isAuthenticated: !!token && !isGuest,
-        isGuest,
+        isAuthenticated: !!user,
+        isGuest: false,
         isAuthScreenVisible,
         setIsAuthScreenVisible,
         isLoading,
         loginEmail,
         signupEmail,
         loginGoogle,
-        sendOtp,
-        verifyOtp,
-        loginAsGuest,
+        sendPasswordReset,
         logout,
         updateProfileName,
       }}

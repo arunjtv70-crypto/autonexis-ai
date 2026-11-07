@@ -1,102 +1,116 @@
-import random
-import string
-from datetime import datetime, timedelta, timezone
+import logging
 from typing import Optional, Dict, Any
-import bcrypt
-import jwt
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import google.oauth2.id_token
+import google.auth.transport.requests
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import User, get_db
 
+logger = logging.getLogger("autonexis.auth")
 security = HTTPBearer(auto_error=False)
+http_request = google.auth.transport.requests.Request()
 
-def hash_password(password: str) -> str:
-    """Hashes a password securely using bcrypt with automatic salt."""
-    salt = bcrypt.gensalt(rounds=12)
-    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies a plain password against the stored bcrypt hash."""
-    if not hashed_password:
-        return False
+def verify_firebase_id_token(token: str) -> Dict[str, Any]:
+    """
+    Verifies a Firebase ID token using Google's public keys.
+    Audience is set to the Firebase project ID.
+    Raises HTTPException 401 if invalid, expired, or wrong audience.
+    """
     try:
-        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
-    except Exception:
-        return False
-
-def create_access_token(user_id: str, extra_data: Optional[Dict[str, Any]] = None) -> str:
-    """Generates a secure JWT session token."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload = {
-        "sub": user_id,
-        "exp": expire,
-        "iat": datetime.now(timezone.utc),
-    }
-    if extra_data:
-        payload.update(extra_data)
-    token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
-    return token
-
-def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decodes and validates a JWT token."""
-    try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        return payload
-    except (jwt.PyJWTError, Exception):
-        return None
-
-def generate_six_digit_otp() -> str:
-    """Generates a secure 6-digit numeric OTP."""
-    return "".join(random.choices(string.digits, k=6))
+        decoded = google.oauth2.id_token.verify_firebase_token(
+            token,
+            http_request,
+            audience=settings.firebase_project_id
+        )
+        if not decoded or not (decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")):
+            raise ValueError("Token missing uid claim.")
+        return decoded
+    except Exception as exc:
+        logger.warning(f"Firebase token verification failed: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or unauthorized authentication token. Please log in again."
+        )
 
 async def get_current_user(
     auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db)
 ) -> User:
     """
-    FastAPI dependency to identify and authenticate the user from Session Bearer Token.
+    FastAPI dependency that validates Firebase ID token from Authorization: Bearer <token>.
+    Guarantees user.id is the verified Firebase UID.
+    Auto-provisions the user record in SQLite if not yet present.
     """
     if not auth or not auth.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="सत्र समाप्त या अनुपस्थित है। कृपया लॉगिन करें।"
+            detail="Authentication token is missing. Please log in."
         )
-    
-    payload = decode_access_token(auth.credentials)
-    if not payload or "sub" not in payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="अमान्य या समाप्त टोकन। कृपया पुनः लॉगिन करें।"
-        )
-    
-    user_id = payload["sub"]
-    result = await db.execute(select(User).where(User.id == user_id))
+
+    token = auth.credentials.strip()
+    decoded = verify_firebase_id_token(token)
+
+    uid: str = decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")
+    email: Optional[str] = decoded.get("email")
+    raw_name = decoded.get("name")
+    if raw_name:
+        display_name = raw_name
+    elif email:
+        display_name = email.split("@")[0].replace(".", " ").title()
+    else:
+        display_name = "AUTONEXIS User"
+
+    # Query existing user by verified Firebase UID
+    stmt = select(User).where(User.id == uid)
+    result = await db.execute(stmt)
     user = result.scalars().first()
-    
+
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="उपयोगकर्ता खाता नहीं मिला।"
+        user = User(
+            id=uid,
+            email=email,
+            display_name=display_name,
+            theme_preference="auto"
         )
-    
+        db.add(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+        except Exception:
+            await db.rollback()
+            # In case of concurrency, fetch existing
+            res2 = await db.execute(stmt)
+            user = res2.scalars().first()
+    else:
+        # Update email/name if changed in Firebase
+        updated = False
+        if email and user.email != email:
+            user.email = email
+            updated = True
+        if raw_name and user.display_name != raw_name:
+            user.display_name = raw_name
+            updated = True
+        if updated:
+            try:
+                await db.commit()
+                await db.refresh(user)
+            except Exception:
+                await db.rollback()
+
     return user
 
 async def get_optional_user(
     auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db)
 ) -> Optional[User]:
-    """Optional user authentication for guest or hybrid flows."""
+    """Optional user dependency that returns None instead of raising 401."""
     if not auth or not auth.credentials:
         return None
-    payload = decode_access_token(auth.credentials)
-    if not payload or "sub" not in payload:
+    try:
+        return await get_current_user(auth, db)
+    except HTTPException:
         return None
-    user_id = payload["sub"]
-    result = await db.execute(select(User).where(User.id == user_id))
-    return result.scalars().first()
-

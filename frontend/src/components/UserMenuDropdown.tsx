@@ -33,7 +33,7 @@ interface UserMenuDropdownProps {
   onClose: () => void;
   userEmail: string;
   onOpenSettings: (tab?: SettingsTabId) => void;
-  onLogout: () => void;
+  onLogout: () => void | Promise<void>;
   onInstallPwa?: () => void;
 }
 
