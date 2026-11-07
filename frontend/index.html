@@ -8,8 +8,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>AUTONEXIS Assistant</title>
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="icon" type="image/png" href="/favicon.png?v=20261107" />
+    <link rel="apple-touch-icon" href="/icon-192.png?v=20261107" />
     <link rel="manifest" href="/manifest.json" />
     
     <!-- Google Fonts for thin, clean typography with Hindi support -->
@@ -31,6 +31,10 @@
             caches.keys().then(function(keys) {
               for (var j = 0; j < keys.length; j++) { caches.delete(keys[j]); }
             });
+          }
+          var av = localStorage.getItem('autonexis_user_avatar');
+          if (av && !av.startsWith('data:') && !av.includes('?v=')) {
+            localStorage.removeItem('autonexis_user_avatar');
           }
         } catch (e) {}
 

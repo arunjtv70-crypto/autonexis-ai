@@ -377,7 +377,7 @@ export const ChatScreen: React.FC = () => {
           <div className="user-profile-left">
             <div className="user-avatar-circle">
               <img
-                src={localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png"}
+                src={localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107"}
                 alt="User"
                 className="user-avatar-img"
               />
@@ -502,7 +502,7 @@ export const ChatScreen: React.FC = () => {
               {/* Star Greeting */}
               <div className="home-greeting-section">
                 <img
-                  src="/logo_icon.png"
+                  src="/logo_icon.png?v=20261107"
                   alt="Orbital Star"
                   className="home-orbital-icon"
                 />
@@ -756,7 +756,7 @@ export const ChatScreen: React.FC = () => {
                       {!isUser && (
                         <div className="assistant-avatar" aria-hidden="true">
                           <img
-                            src="/logo_icon.png"
+                            src="/logo_icon.png?v=20261107"
                             alt="AUTONEXIS"
                             className="assistant-avatar-img"
                           />
@@ -823,7 +823,7 @@ export const ChatScreen: React.FC = () => {
                   <div className="message-row assistant-row">
                     <div className="assistant-avatar">
                       <img
-                        src="/logo_icon.png"
+                        src="/logo_icon.png?v=20261107"
                         alt="AUTONEXIS"
                         className="assistant-avatar-img"
                       />

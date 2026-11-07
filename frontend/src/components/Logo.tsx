@@ -16,7 +16,7 @@ export const Logo: React.FC<LogoProps> = ({
     <div className={`autonexis-logo size-${size} ${className}`}>
       <div className="logo-circle-frame" aria-hidden="true">
         <img
-          src="/logo_circle.png"
+          src="/logo_circle.png?v=20261107"
           alt="AUTONEXIS"
           className="logo-circle-img"
         />

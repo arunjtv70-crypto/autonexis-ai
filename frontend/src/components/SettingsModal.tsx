@@ -56,7 +56,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [fullName, setFullName] = useState(user?.display_name || "Arun ambedkar34");
   const [callName, setCallName] = useState(memory.userName || "Arun");
   const [workDesc, setWorkDesc] = useState(() => localStorage.getItem("autonexis_user_work") || "Engineering");
-  const [avatarUrl, setAvatarUrl] = useState(() => localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png");
+  const [avatarUrl, setAvatarUrl] = useState(() => localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107");
   const [orgId] = useState("42035f7c-bd9f-43b4-946a-1a7226bd2e91");
   const [copiedOrgId, setCopiedOrgId] = useState(false);
   const [accountSaved, setAccountSaved] = useState(false);
