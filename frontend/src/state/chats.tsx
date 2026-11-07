@@ -404,7 +404,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         .trim() || content.trim();
 
       const seed = Math.floor(Math.random() * 900000) + 100000;
-      const generatedImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=1024&height=768&nologo=true&seed=${seed}`;
+      const generatedImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=1024&height=768&nologo=true&private=true&seed=${seed}`;
 
       setTimeout(() => {
         const assistantMsg: MessageItem = {

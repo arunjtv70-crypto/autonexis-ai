@@ -12,7 +12,7 @@ import {
 } from "./Icons";
 import "./CreationCards.css";
 
-// 1. Image Creation Card Component
+// 1. Image Creation Card Component with AUTONEXIS Branding Watermark
 interface ImageCardProps {
   prompt: string;
   imageUrl?: string;
@@ -27,11 +27,13 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  // If no direct image URL is provided, generate dynamically via Pollinations AI
-  const cleanPrompt = prompt.replace(/^(image of|generate image|create image|photo of|drawing of|banao)/i, "").trim() || "cinematic futuristic abstract art";
+  // Clean prompt and enforce nologo / private parameters
+  const cleanPrompt =
+    prompt.replace(/^(image of|generate image|create image|photo of|drawing of|banao)/i, "").trim() ||
+    "cinematic futuristic abstract art";
   const finalImageUrl =
     imageUrl ||
-    `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=1024&height=768&nologo=true&seed=42`;
+    `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=1024&height=768&nologo=true&private=true&seed=42`;
 
   const handleCopyPrompt = () => {
     navigator.clipboard.writeText(prompt);
@@ -39,18 +41,77 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Download image with official AUTONEXIS logo branding
   const handleDownload = async () => {
     try {
-      const res = await fetch(finalImageUrl);
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `autonexis_${Date.now()}.jpg`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = finalImageUrl;
+
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+      });
+
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth || 1024;
+      canvas.height = img.naturalHeight || 768;
+      const ctx = canvas.getContext("2d");
+
+      if (ctx) {
+        ctx.drawImage(img, 0, 0);
+
+        // Load and stamp AUTONEXIS logo at bottom-right corner
+        const logoImg = new Image();
+        logoImg.src = "/logo_circle.png";
+        await new Promise((res) => {
+          logoImg.onload = res;
+          logoImg.onerror = res;
+        });
+
+        const badgeW = 150;
+        const badgeH = 34;
+        const badgeX = canvas.width - badgeW - 16;
+        const badgeY = canvas.height - badgeH - 16;
+
+        // Rounded dark pill covering bottom-right
+        ctx.fillStyle = "rgba(12, 12, 16, 0.92)";
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 17);
+        } else {
+          ctx.rect(badgeX, badgeY, badgeW, badgeH);
+        }
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(168, 85, 247, 0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Draw circular logo
+        try {
+          ctx.drawImage(logoImg, badgeX + 6, badgeY + 4, 26, 26);
+        } catch {}
+
+        // Draw AUTONEXIS label
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 13px system-ui, -apple-system, sans-serif";
+        ctx.fillText("AUTONEXIS", badgeX + 38, badgeY + 22);
+
+        canvas.toBlob((blob) => {
+          if (blob) {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `autonexis_${Date.now()}.png`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+          }
+        }, "image/png");
+        return;
+      }
     } catch {
       window.open(finalImageUrl, "_blank");
     }
@@ -92,6 +153,16 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
           onLoad={() => setIsLoading(false)}
           onError={() => setIsLoading(false)}
         />
+
+        {/* AUTONEXIS Official Watermark Pill covering bottom-right */}
+        <div className="creation-watermark-overlay" title="AUTONEXIS Assistant">
+          <img
+            src="/logo_circle.png"
+            alt="AUTONEXIS"
+            className="watermark-logo-img"
+          />
+          <span>AUTONEXIS</span>
+        </div>
       </div>
 
       <div className="creation-card-footer">
@@ -110,7 +181,17 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
 
       {isFullscreen && (
         <div className="creation-lightbox" onClick={() => setIsFullscreen(false)}>
-          <img src={finalImageUrl} alt={prompt} className="lightbox-img" />
+          <div className="lightbox-img-wrapper" onClick={(e) => e.stopPropagation()}>
+            <img src={finalImageUrl} alt={prompt} className="lightbox-img" />
+            <div className="creation-watermark-overlay lightbox-watermark">
+              <img
+                src="/logo_circle.png"
+                alt="AUTONEXIS"
+                className="watermark-logo-img"
+              />
+              <span>AUTONEXIS</span>
+            </div>
+          </div>
           <button
             type="button"
             className="lightbox-close-btn"
@@ -162,39 +243,48 @@ export const VideoCreationCard: React.FC<VideoCardProps> = ({
 
       for (let i = 0; i < 4; i++) {
         const radius = 60 + i * 35;
+        const angle = step * (i % 2 === 0 ? 1 : -1) + (i * Math.PI) / 3;
+
         ctx.beginPath();
-        ctx.arc(
-          cx + Math.sin(step + i) * 12,
-          cy + Math.cos(step + i) * 12,
-          radius,
-          0,
-          Math.PI * 2
-        );
-        ctx.strokeStyle = i % 2 === 0 ? "rgba(168, 85, 247, 0.45)" : "rgba(200, 169, 126, 0.45)";
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(168, 85, 247, ${0.12 + i * 0.08})`;
         ctx.lineWidth = 1.5;
         ctx.stroke();
+
+        // Orbiting particles
+        const px = cx + Math.cos(angle) * radius;
+        const py = cy + Math.sin(angle) * (radius * 0.55);
+
+        ctx.beginPath();
+        ctx.arc(px, py, 4 + i, 0, Math.PI * 2);
+        ctx.fillStyle = i === 1 ? "#c084fc" : "#a855f7";
+        ctx.shadowColor = "#a855f7";
+        ctx.shadowBlur = 12;
+        ctx.fill();
+        ctx.shadowBlur = 0;
       }
 
-      // Center glowing star core
-      const glow = ctx.createRadialGradient(cx, cy, 5, cx, cy, 45);
-      glow.addColorStop(0, "rgba(255, 255, 255, 0.95)");
-      glow.addColorStop(0.5, "rgba(168, 85, 247, 0.5)");
-      glow.addColorStop(1, "transparent");
-      ctx.fillStyle = glow;
+      // Center glowing core
+      const gradient = ctx.createRadialGradient(cx, cy, 5, cx, cy, 45);
+      gradient.addColorStop(0, "rgba(233, 213, 255, 0.95)");
+      gradient.addColorStop(0.5, "rgba(168, 85, 247, 0.6)");
+      gradient.addColorStop(1, "rgba(168, 85, 247, 0)");
+
       ctx.beginPath();
       ctx.arc(cx, cy, 45, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
       ctx.fill();
 
-      // Cinematic text overlay
-      ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
-      ctx.font = "14px Inter, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(prompt.slice(0, 50), cx, height - 30);
+      // Official Autonexis watermark text
+      ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.font = "11px system-ui";
+      ctx.fillText("AUTONEXIS VIDEO STUDIO 4K", 16, height - 16);
 
       if (isPlaying) {
         setProgress((prev) => (prev >= 100 ? 0 : prev + 0.6));
-        animFrameRef.current = requestAnimationFrame(renderFrame);
       }
+
+      animFrameRef.current = requestAnimationFrame(renderFrame);
     };
 
     renderFrame();
@@ -202,7 +292,7 @@ export const VideoCreationCard: React.FC<VideoCardProps> = ({
     return () => {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [isPlaying, prompt]);
+  }, [isPlaying]);
 
   const togglePlay = () => {
     setIsPlaying((prev) => !prev);
@@ -214,9 +304,9 @@ export const VideoCreationCard: React.FC<VideoCardProps> = ({
         <div className="creation-card-tag">
           <IconVideo size={15} />
           <span>AUTONEXIS Video Studio</span>
-          <span className="creation-badge">4K • 60 FPS</span>
+          <span className="creation-badge">4K 60FPS</span>
         </div>
-        <span className="video-duration-pill">{duration} HDR</span>
+        <div className="video-duration-pill">{duration}</div>
       </div>
 
       <div className="video-player-container" onClick={togglePlay}>
@@ -304,4 +394,3 @@ export const SpeechAudioButton: React.FC<{ text: string }> = ({ text }) => {
     </button>
   );
 };
-
