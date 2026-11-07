@@ -10,3 +10,4 @@ if exist backend\venv\Scripts\python.exe (
     python run.py
 )
 pause
+

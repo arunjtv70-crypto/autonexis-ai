@@ -482,6 +482,29 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const crossChatContext = getCrossChatMemoryContext(chats, targetChatId);
 
     let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
+
+    // Strict Language Mirroring Detection
+    const hasDevanagari = /[\u0900-\u097F]/.test(content);
+    const hinglishMarkers = [
+      "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
+      "naam", "nam", "kaise", "kaisa", "kaisi", "batao", "bataiye", "bol", "bolo", "bolna",
+      "kaho", "kehna", "aaj", "kal", "dukhi", "khush", "yaar", "bhai", "dost", "thik", "theek",
+      "nahi", "nahin", "mat", "karo", "karna", "acha", "achha", "accha", "bahut", "bohot",
+      "samajh", "aaya", "gaya", "chahiye", "kuch", "kuchh", "yeh", "ye", "woh", "wo", "apna",
+      "apne", "apni", "aap", "tum", "tu", "kyu", "kyun", "kaha", "kahan", "kab", "kaun",
+      "kaam", "baat", "bata", "rakho", "rakh", "dekh", "dekho", "suno", "sun", "paas", "bhi"
+    ];
+    const inputWords = content.toLowerCase().split(/[\s,?.!;:()"]+/);
+    const isHinglish = !hasDevanagari && inputWords.some((w) => hinglishMarkers.includes(w));
+
+    if (hasDevanagari) {
+      memoryPrompt += `\nLANGUAGE MANDATE: User is writing in Devanagari Hindi. Reply naturally in Hindi using Devanagari script.\n`;
+    } else if (isHinglish) {
+      memoryPrompt += `\nLANGUAGE MANDATE (CRITICAL): User is writing in HINGLISH (Hindi typed in English letters, e.g. "${content}"). You MUST reply in natural, friendly HINGLISH using English/Roman alphabet (e.g. "Main badhiya hoon! Aap batao, sab kaisa chal raha hai?"). NEVER reply in Devanagari Hindi!\n`;
+    } else {
+      memoryPrompt += `\nLANGUAGE MANDATE: User is writing in English. Reply completely in natural, fluent English.\n`;
+    }
+
     if (extractedName) {
       memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${content}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
     }

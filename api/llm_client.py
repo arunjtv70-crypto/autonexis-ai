@@ -7,7 +7,51 @@ from config import settings
 logger = logging.getLogger("autonexis.llm")
 logging.basicConfig(level=logging.INFO)
 
-FRIENDLY_ERROR_MESSAGE = "क्षमा करें, इस समय सेवा अनुपलब्ध है। कृपया थोड़ी देर बाद पुनः प्रयास करें।"
+FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
+
+def detect_language_directive(user_text: str) -> str:
+    """
+    Analyzes the user's message and outputs a strict language matching directive
+    so the model speaks in the exact same language (Hinglish, English, or Hindi).
+    """
+    clean = user_text.strip()
+    if not clean:
+        return "LANGUAGE MANDATE: Reply in the same language as the user."
+    
+    # 1. Devanagari Hindi check (\u0900 to \u097F)
+    has_devanagari = any('\u0900' <= char <= '\u097f' for char in clean)
+    if has_devanagari:
+        return (
+            "LANGUAGE MANDATE: The user wrote in Devanagari Hindi (हिंदी). "
+            "You MUST reply in natural, fluent Hindi using Devanagari script."
+        )
+    
+    # 2. Hinglish vocabulary check (Hindi written in Roman/English script)
+    hinglish_markers = {
+        "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
+        "naam", "nam", "kaise", "kaisa", "kaisi", "batao", "bataiye", "bol", "bolo", "bolna",
+        "kaho", "kehna", "aaj", "kal", "dukhi", "khush", "yaar", "bhai", "dost", "thik", "theek",
+        "nahi", "nahin", "mat", "karo", "karna", "acha", "achha", "accha", "bahut", "bohot",
+        "samajh", "aaya", "gaya", "chahiye", "kuch", "kuchh", "yeh", "ye", "woh", "wo", "apna",
+        "apne", "apni", "aap", "tum", "tu", "kyu", "kyun", "kaha", "kahan", "kab", "kaun",
+        "kaam", "baat", "bata", "rakho", "rakh", "dekh", "dekho", "suno", "sun", "paas", "bhi",
+        "hoga", "hogi", "dena", "le", "lo", "bhaiya", "sir", "madam", "badhiya", "chal", "raha",
+        "pehle", "pichli", "purani", "yaad", "bolo", "bhi", "sahi", "sab", "toh", "to"
+    }
+    
+    words = set(w.lower().strip(".,!?:;\"'()[]{}") for w in clean.split())
+    if any(w in hinglish_markers for w in words):
+        return (
+            "LANGUAGE MANDATE (CRITICAL - HIGHEST PRIORITY):\n"
+            "The user is speaking to you in HINGLISH (Hindi typed in English alphabet, e.g. 'kya kar rhe ho', 'me aaj dukhi hu').\n"
+            "You MUST reply in natural, conversational HINGLISH using the English/Roman alphabet (e.g. 'Main theek hoon! Aap batao, sab kaisa chal raha hai?').\n"
+            "DO NOT USE DEVANAGARI SCRIPT (हिंदी)! Strictly use Roman/English alphabet to match the user."
+        )
+    
+    # 3. Default to English
+    return (
+        "LANGUAGE MANDATE: The user wrote in English. You MUST reply completely in natural, fluent English."
+    )
 
 class LLMClient:
     def __init__(self):
@@ -19,8 +63,8 @@ class LLMClient:
 
     def _prepare_messages(self, messages: List[Dict[str, str]], user_memory: Optional[str] = None) -> List[Dict[str, str]]:
         """
-        Prepends the strict AUTONEXIS Assistant system prompt plus persistent cross-chat memory.
-        Preserves complete conversation history context.
+        Prepends the strict AUTONEXIS Assistant system prompt plus persistent cross-chat memory
+        and precise language matching directive.
         """
         extra_system_context = []
         if user_memory and user_memory.strip():
@@ -34,21 +78,31 @@ class LLMClient:
             )
         
         user_and_assistant = []
+        last_user_text = ""
         for msg in messages:
             if msg.get("role") == "system":
                 c = msg.get("content", "").strip()
                 if c:
                     extra_system_context.append(c)
             else:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
                 user_and_assistant.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", "")
+                    "role": role,
+                    "content": content
                 })
+                if role == "user" and content:
+                    last_user_text = content.strip()
+
+        # Dynamic Language Matching Directive
+        if last_user_text:
+            lang_mandate = detect_language_directive(last_user_text)
+            extra_system_context.append(lang_mandate)
 
         full_system = self.system_prompt
         if extra_system_context:
             full_system += "\n\n" + "\n\n".join(extra_system_context)
-            full_system += "\n\nNOTE: You MUST accurately remember and reference these persistent user details across all conversations whenever asked."
+            full_system += "\n\nNOTE: You MUST accurately remember and reference user details and ALWAYS match the user's language."
 
         return [{"role": "system", "content": full_system}] + user_and_assistant
 
@@ -98,15 +152,14 @@ class LLMClient:
                                         yield f"data: {payload_out}\n\n"
                             except json.JSONDecodeError:
                                 continue
-
-        except Exception as exc:
-            logger.exception(f"[AUTONEXIS LLM EXCEPTION] {str(exc)}")
+        except Exception as e:
+            logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {e}")
             yield f"data: {json.dumps({'error': True, 'content': FRIENDLY_ERROR_MESSAGE}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
     async def chat_non_stream(self, messages: List[Dict[str, str]], user_memory: Optional[str] = None) -> Dict[str, str]:
         """
-        Non-streaming chat completion for quick API testing or single request-response.
+        Non-streaming completion fallback.
         """
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
@@ -123,16 +176,15 @@ class LLMClient:
         try:
             timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(endpoint, json=payload, headers=headers)
-                if response.status_code != 200:
-                    logger.error(f"[AUTONEXIS LLM ERROR] Status {response.status_code}: {response.text}")
-                    return {"reply": FRIENDLY_ERROR_MESSAGE, "status": "error"}
-                data = response.json()
+                res = await client.post(endpoint, json=payload, headers=headers)
+                if res.status_code != 200:
+                    logger.error(f"[AUTONEXIS LLM ERROR] {res.status_code}: {res.text}")
+                    return {"reply": FRIENDLY_ERROR_MESSAGE}
+                data = res.json()
                 reply = data["choices"][0]["message"]["content"]
-                return {"reply": reply, "status": "success"}
-        except Exception as exc:
-            logger.exception(f"[AUTONEXIS LLM EXCEPTION] {str(exc)}")
-            return {"reply": FRIENDLY_ERROR_MESSAGE, "status": "error"}
+                return {"reply": reply}
+        except Exception as e:
+            logger.error(f"[AUTONEXIS LLM EXCEPTION] {e}")
+            return {"reply": FRIENDLY_ERROR_MESSAGE}
 
 llm_client = LLMClient()
-
