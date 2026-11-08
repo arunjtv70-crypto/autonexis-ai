@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Union, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,11 +18,22 @@ class CreateChatRequest(BaseModel):
     title: Optional[str] = "नई बातचीत"
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(..., min_length=1, description="मैसेज सामग्री")
+    content: Union[str, List[Dict[str, Any]]] = Field(..., description="मैसेज सामग्री")
 
-def generate_clean_title(content: str) -> str:
+def extract_text(content: Union[str, List[Dict[str, Any]]]) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            return item.get("text", "").strip()
+    return "[Attachment]"
+
+def generate_clean_title(content: Union[str, List[Dict[str, Any]]]) -> str:
     """Generates a brief 4-6 word title from first user message."""
-    words = content.strip().split()
+    text = extract_text(content)
+    words = text.split()
+    if not words:
+        return "नई बातचीत"
     if len(words) <= 6:
         return " ".join(words)
     return " ".join(words[:6]) + "..."
@@ -167,10 +178,11 @@ async def send_chat_message(
         chat.title = generate_clean_title(req.content)
 
     # Save User message
+    user_msg_text = extract_text(req.content)
     user_msg = Message(
         chat_id=chat.id,
         role="user",
-        content=req.content.strip()
+        content=user_msg_text
     )
     db.add(user_msg)
     chat.updated_at = datetime.now(timezone.utc)
@@ -178,7 +190,7 @@ async def send_chat_message(
 
     # Build context from previous messages + new user message
     history = [{"role": m.role, "content": m.content} for m in chat.messages]
-    history.append({"role": "user", "content": req.content.strip()})
+    history.append({"role": "user", "content": req.content})
 
     # Call LLM
     llm_resp = await llm_client.chat_non_stream(history)
@@ -232,17 +244,18 @@ async def stream_chat_message(
     if not chat.messages or chat.title == "नई बातचीत":
         chat.title = generate_clean_title(req.content)
 
+    user_msg_text = extract_text(req.content)
     user_msg = Message(
         chat_id=chat.id,
         role="user",
-        content=req.content.strip()
+        content=user_msg_text
     )
     db.add(user_msg)
     chat.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
     history = [{"role": m.role, "content": m.content} for m in chat.messages]
-    history.append({"role": "user", "content": req.content.strip()})
+    history.append({"role": "user", "content": req.content})
 
     async def event_generator():
         collected_tokens = []

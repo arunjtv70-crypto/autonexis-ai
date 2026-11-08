@@ -56,6 +56,8 @@ interface AuthContextType {
   isGuest: boolean;
   isAuthScreenVisible: boolean;
   setIsAuthScreenVisible: (visible: boolean) => void;
+  continueAsGuest: () => void;
+  exitGuestMode: () => void;
   isLoading: boolean;
   loginEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string; errorCode?: string }>;
   signupEmail: (name: string, email: string, pass: string) => Promise<{ success: boolean; error?: string; errorCode?: string; message?: string }>;
@@ -73,6 +75,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAuthScreenVisible, setIsAuthScreenVisible] = useState<boolean>(false);
+  const [isGuest, setIsGuest] = useState<boolean>(() => {
+    return localStorage.getItem("autonexis_is_guest") === "true";
+  });
 
   // Sync Firebase User to UserResponse format
   const syncUser = async (fbUser: FirebaseUser | null) => {
@@ -80,7 +85,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setFirebaseUser(null);
       setUser(null);
       setToken(null);
-      setIsAuthScreenVisible(true);
+      if (localStorage.getItem("autonexis_is_guest") === "true") {
+        setIsGuest(true);
+        setIsAuthScreenVisible(false);
+      } else {
+        setIsGuest(false);
+        setIsAuthScreenVisible(true);
+      }
       return;
     }
 
@@ -102,6 +113,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setFirebaseUser(fbUser);
       setUser(mapped);
       setToken(idToken);
+      setIsGuest(false);
+      localStorage.removeItem("autonexis_is_guest");
       setIsAuthScreenVisible(false);
     } catch (err) {
       console.error("[AUTONEXIS] Failed to extract token:", err);
@@ -109,6 +122,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setToken(null);
       setIsAuthScreenVisible(true);
     }
+  };
+
+  const continueAsGuest = () => {
+    setIsGuest(true);
+    localStorage.setItem("autonexis_is_guest", "true");
+    setIsAuthScreenVisible(false);
+  };
+
+  const exitGuestMode = () => {
+    setIsGuest(false);
+    localStorage.removeItem("autonexis_is_guest");
+    setIsAuthScreenVisible(true);
   };
 
   // 1. Listen to real Firebase Auth State
@@ -272,6 +297,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setFirebaseUser(null);
       setToken(null);
+      setIsGuest(false);
+      localStorage.removeItem("autonexis_is_guest");
       setIsAuthScreenVisible(true);
       setIsLoading(false);
     }
@@ -308,7 +335,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         firebaseUser,
         token,
         isAuthenticated: !!user,
-        isGuest: false,
+        isGuest,
+        continueAsGuest,
+        exitGuestMode,
         isAuthScreenVisible,
         setIsAuthScreenVisible,
         isLoading,

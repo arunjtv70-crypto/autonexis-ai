@@ -9,7 +9,7 @@ import "./AuthScreen.css";
 type AuthTab = "email" | "phone";
 
 export const AuthScreen: React.FC = () => {
-  const { loginEmail, signupEmail, loginGoogle, sendPasswordReset, isLoading } = useAuth();
+  const { loginEmail, signupEmail, loginGoogle, sendPasswordReset, continueAsGuest, isLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<AuthTab>("email");
   const [isSignUp, setIsSignUp] = useState<boolean>(false);
@@ -246,6 +246,30 @@ export const AuthScreen: React.FC = () => {
           <IconGoogle size={18} />
           <span>Continue with Google</span>
         </Button>
+
+        {/* Subtle Guest Mode Option */}
+        <div style={{ textAlign: "center", marginTop: "12px" }}>
+          <button
+            type="button"
+            className="auth-guest-link"
+            onClick={continueAsGuest}
+            disabled={isLoading}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--text-secondary, #94a3b8)",
+              fontSize: "0.82rem",
+              cursor: "pointer",
+              padding: "6px 12px",
+              borderRadius: "6px",
+              transition: "color 0.15s ease",
+              textDecoration: "underline",
+              textUnderlineOffset: "3px",
+            }}
+          >
+            Try without login
+          </button>
+        </div>
 
         {/* Footer */}
         <footer className="auth-footer-note">

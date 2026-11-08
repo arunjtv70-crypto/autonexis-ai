@@ -2,18 +2,31 @@ import { API_BASE_URL } from "../config";
 import { auth } from "../firebase";
 import { signOut } from "firebase/auth";
 
+export type MultimodalPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type MessageContent = string | MultimodalPart[];
+
 export interface ChatMessagePayload {
   role: "user" | "assistant";
-  content: string;
+  content: MessageContent;
 }
 
 /**
- * Returns authorization headers with the fresh Firebase ID token.
+ * Returns authorization headers with the fresh Firebase ID token,
+ * or the X-Guest header when in guest mode.
  */
-async function getAuthHeaders(): Promise<HeadersInit> {
+async function getAuthHeaders(isGuest = false): Promise<HeadersInit> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
+
+  if (isGuest) {
+    headers["X-Guest"] = "1";
+    return headers;
+  }
+
   const currentUser = auth.currentUser;
   if (currentUser) {
     try {
@@ -41,11 +54,12 @@ async function handleUnauthorized(): Promise<void> {
 
 export async function postChatMessage(
   messages: ChatMessagePayload[],
-  userMemory?: string
+  userMemory?: string,
+  isGuest = false
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat`;
   try {
-    const headers = await getAuthHeaders();
+    const headers = await getAuthHeaders(isGuest);
     const res = await fetch(url, {
       method: "POST",
       headers,
@@ -77,11 +91,12 @@ export async function streamChatMessage(
   userMemory: string | undefined,
   onChunk: (token: string) => void,
   onDone: () => void,
-  onError: (err: any) => void
+  onError: (err: any) => void,
+  isGuest = false
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
-    const headers = await getAuthHeaders();
+    const headers = await getAuthHeaders(isGuest);
     const res = await fetch(url, {
       method: "POST",
       headers,
@@ -99,7 +114,7 @@ export async function streamChatMessage(
 
     if (!res.ok || !res.body) {
       // Fallback to non-streaming if stream is unsupported
-      const directReply = await postChatMessage(messages, userMemory);
+      const directReply = await postChatMessage(messages, userMemory, isGuest);
       onChunk(directReply);
       onDone();
       return;
@@ -117,25 +132,31 @@ export async function streamChatMessage(
       }
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n\n");
-      buffer = lines.pop() || "";
+      // Standard SSE event boundary
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed.startsWith("data: ")) {
-          const dataStr = trimmed.slice(6).trim();
-          if (dataStr === "[DONE]") {
-            onDone();
-            return;
-          }
-          try {
-            const parsed = JSON.parse(dataStr);
-            if (parsed.content) {
-              onChunk(parsed.content);
+      for (const event of events) {
+        if (!event) continue;
+        const lines = event.split(/\r?\n/);
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            if (dataStr.trim() === "[DONE]") {
+              onDone();
+              return;
             }
-          } catch {
-            // Ignore non-json chunk
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.error && parsed.content) {
+                onChunk(parsed.content);
+              } else if (typeof parsed.content === "string") {
+                // NEVER trim chunks - preserve spaces, code indentation, and newlines!
+                onChunk(parsed.content);
+              }
+            } catch {
+              // Ignore non-json chunk
+            }
           }
         }
       }

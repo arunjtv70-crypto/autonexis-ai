@@ -1,6 +1,7 @@
+import os
 import json
 import logging
-from typing import AsyncGenerator, List, Dict, Optional
+from typing import AsyncGenerator, List, Dict, Any, Optional, Union
 import httpx
 from config import settings
 
@@ -8,6 +9,29 @@ logger = logging.getLogger("autonexis.llm")
 logging.basicConfig(level=logging.INFO)
 
 FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
+VISION_ERROR_MESSAGE = "I couldn't read this image. Please try a smaller or clearer one."
+
+def has_image_content(messages: List[Dict[str, Any]]) -> bool:
+    """Checks if any message contains an image_url block."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+def extract_text_from_content(content: Union[str, List[Dict[str, Any]]]) -> str:
+    """Extracts plain text string from either string or multimodal list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                texts.append(part.get("text", ""))
+        return " ".join(texts)
+    return ""
 
 def detect_language_directive(user_text: str) -> str:
     """
@@ -57,14 +81,25 @@ class LLMClient:
     def __init__(self):
         self.api_key = settings.llm_api_key
         self.model = settings.llm_model
-        # Strip trailing slash from base url if present
+        self.vision_model = getattr(settings, "llm_vision_model", "qwen/qwen3.8-27b")
         self.base_url = settings.llm_base_url.rstrip("/")
         self.system_prompt = settings.system_prompt
 
-    def _prepare_messages(self, messages: List[Dict[str, str]], user_memory: Optional[str] = None) -> List[Dict[str, str]]:
+    def _get_active_model(self, messages: List[Dict[str, Any]]) -> str:
+        """Dynamically picks vision model if messages contain an image, else text model."""
+        if has_image_content(messages):
+            return os.environ.get("LLM_VISION_MODEL") or self.vision_model or "qwen/qwen3.8-27b"
+        return os.environ.get("LLM_MODEL") or self.model
+
+    def _prepare_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        user_memory: Optional[str] = None,
+        max_history = 18
+    ) -> List[Dict[str, Any]]:
         """
-        Prepends the strict AUTONEXIS Assistant system prompt plus persistent cross-chat memory
-        and precise language matching directive.
+        Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory
+        and language matching directive. Retains recent conversation history.
         """
         extra_system_context = []
         if user_memory and user_memory.strip():
@@ -77,22 +112,27 @@ class LLMClient:
                 "NEVER say you do not remember or that you cannot access past conversations."
             )
         
+        # Trim history if excessively long while keeping recent context
+        trimmed_messages = messages[-max_history:] if len(messages) > max_history else messages
+
         user_and_assistant = []
         last_user_text = ""
-        for msg in messages:
-            if msg.get("role") == "system":
-                c = msg.get("content", "").strip()
+        for msg in trimmed_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                c = extract_text_from_content(content).strip()
                 if c:
                     extra_system_context.append(c)
             else:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
                 user_and_assistant.append({
                     "role": role,
                     "content": content
                 })
-                if role == "user" and content:
-                    last_user_text = content.strip()
+                if role == "user":
+                    text_val = extract_text_from_content(content).strip()
+                    if text_val:
+                        last_user_text = text_val
 
         # Dynamic Language Matching Directive
         if last_user_text:
@@ -106,22 +146,34 @@ class LLMClient:
 
         return [{"role": "system", "content": full_system}] + user_and_assistant
 
-    async def chat_stream(self, messages: List[Dict[str, str]], user_memory: Optional[str] = None) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        user_memory: Optional[str] = None,
+        is_guest: bool = False
+    ) -> AsyncGenerator[str, None]:
         """
         Streams completion tokens as Server-Sent Events (SSE) data chunks.
-        Compatible with any standard OpenAI-compatible chat completions API.
+        Compatible with standard OpenAI-compatible chat completions API.
         """
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        active_model = self._get_active_model(messages)
+        max_tokens = 512 if is_guest else 2048
+        is_vision = has_image_content(messages)
+
         payload = {
-            "model": self.model,
+            "model": active_model,
             "messages": self._prepare_messages(messages, user_memory),
             "stream": True,
-            "temperature": 0.7,
+            "temperature": 0.6,
+            "max_tokens": max_tokens,
         }
+
+        fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
 
         try:
             timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
@@ -130,7 +182,7 @@ class LLMClient:
                     if response.status_code != 200:
                         error_body = await response.aread()
                         logger.error(f"[AUTONEXIS LLM ERROR] Status {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
-                        yield f"data: {json.dumps({'error': True, 'content': FRIENDLY_ERROR_MESSAGE}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
 
@@ -147,17 +199,23 @@ class LLMClient:
                                 choices = chunk.get("choices", [])
                                 if choices and "delta" in choices[0]:
                                     delta_content = choices[0]["delta"].get("content")
-                                    if delta_content:
+                                    # Never trim delta_content to preserve spaces and newlines
+                                    if delta_content is not None:
                                         payload_out = json.dumps({"content": delta_content}, ensure_ascii=False)
                                         yield f"data: {payload_out}\n\n"
                             except json.JSONDecodeError:
                                 continue
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {e}")
-            yield f"data: {json.dumps({'error': True, 'content': FRIENDLY_ERROR_MESSAGE}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-    async def chat_non_stream(self, messages: List[Dict[str, str]], user_memory: Optional[str] = None) -> Dict[str, str]:
+    async def chat_non_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        user_memory: Optional[str] = None,
+        is_guest: bool = False
+    ) -> Dict[str, str]:
         """
         Non-streaming completion fallback.
         """
@@ -166,12 +224,19 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        active_model = self._get_active_model(messages)
+        max_tokens = 512 if is_guest else 2048
+        is_vision = has_image_content(messages)
+
         payload = {
-            "model": self.model,
+            "model": active_model,
             "messages": self._prepare_messages(messages, user_memory),
             "stream": False,
-            "temperature": 0.7,
+            "temperature": 0.6,
+            "max_tokens": max_tokens,
         }
+
+        fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
 
         try:
             timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
@@ -179,12 +244,12 @@ class LLMClient:
                 res = await client.post(endpoint, json=payload, headers=headers)
                 if res.status_code != 200:
                     logger.error(f"[AUTONEXIS LLM ERROR] {res.status_code}: {res.text}")
-                    return {"reply": FRIENDLY_ERROR_MESSAGE}
+                    return {"reply": fallback_error_msg}
                 data = res.json()
                 reply = data["choices"][0]["message"]["content"]
                 return {"reply": reply}
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM EXCEPTION] {e}")
-            return {"reply": FRIENDLY_ERROR_MESSAGE}
+            return {"reply": fallback_error_msg}
 
 llm_client = LLMClient()

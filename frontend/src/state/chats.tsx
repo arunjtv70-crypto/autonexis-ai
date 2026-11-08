@@ -1,5 +1,10 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
-import { postChatMessage, streamChatMessage, type ChatMessagePayload } from "../api/client";
+import {
+  postChatMessage,
+  streamChatMessage,
+  type ChatMessagePayload,
+  type MultimodalPart,
+} from "../api/client";
 import { useAuth } from "./auth";
 
 export interface MessageItem {
@@ -11,6 +16,13 @@ export interface MessageItem {
   mediaUrl?: string;
   mediaPrompt?: string;
   videoDuration?: string;
+}
+
+export interface AttachmentPayload {
+  type: "image" | "file";
+  dataUrl?: string;
+  textContent?: string;
+  fileName: string;
 }
 
 export interface ChatItem {
@@ -37,8 +49,16 @@ interface ChatsContextType {
   clearAllChats: () => void;
   resetMemory: () => void;
   updateCallName: (name: string) => void;
-  sendMessage: (content: string, mode?: "chat" | "image" | "video" | "voice") => Promise<void>;
+  sendMessage: (
+    content: string,
+    mode?: "chat" | "image" | "video" | "voice",
+    attachment?: AttachmentPayload | null
+  ) => Promise<void>;
   isSending: boolean;
+  guestMsgCount: number;
+  guestMessagesRemaining: number;
+  showGuestLimitModal: boolean;
+  setShowGuestLimitModal: (show: boolean) => void;
 }
 
 const CHATS_STORAGE_KEY = "autonexis_saved_chats";
@@ -113,7 +133,13 @@ function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | nul
 }
 
 export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, updateProfileName } = useAuth();
+  const { user, isGuest, updateProfileName } = useAuth();
+
+  const [guestMsgCount, setGuestMsgCount] = useState<number>(() => {
+    return parseInt(localStorage.getItem("autonexis_guest_msg_count") || "0", 10);
+  });
+  const [showGuestLimitModal, setShowGuestLimitModal] = useState<boolean>(false);
+  const guestMessagesRemaining = Math.max(0, 5 - guestMsgCount);
 
   // Load persistent cross-chat memory
   const [memory, setMemory] = useState<UserMemoryStore>(() => {
@@ -348,8 +374,24 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { extractedName, newFact };
   };
 
-  const sendMessage = async (content: string, mode: "chat" | "image" | "video" | "voice" = "chat") => {
-    if (!content.trim() || isSending) return;
+  const sendMessage = async (
+    content: string,
+    mode: "chat" | "image" | "video" | "voice" = "chat",
+    attachment?: AttachmentPayload | null
+  ) => {
+    const trimmed = content.trim();
+    if ((!trimmed && !attachment) || isSending) return;
+
+    if (isGuest) {
+      if (guestMsgCount >= 5) {
+        setShowGuestLimitModal(true);
+        return;
+      }
+      if (attachment?.type === "image") {
+        setShowGuestLimitModal(true);
+        return;
+      }
+    }
 
     let targetChatId = activeChatId;
     if (!targetChatId) {
@@ -359,26 +401,28 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // Check if message is an image generation request
     const isImageRequest =
       mode === "image" ||
-      /(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)|(?:photo|image|tasveer|chhavi)\s+(?:banao|karo|bana\s+do)/i.test(content);
+      /(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)|(?:photo|image|tasveer|chhavi)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
 
     // Check if message is a video generation request
     const isVideoRequest =
       mode === "video" ||
-      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation|cinematic)|(?:video)\s+(?:banao|karo|bana\s+do)/i.test(content);
+      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation|cinematic)|(?:video)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
 
     // Immediately extract memory from user message
-    const { extractedName, newFact } = extractUserMemory(content);
+    const { extractedName, newFact } = extractUserMemory(trimmed);
 
     const userMsg: MessageItem = {
       id: "usr_" + Date.now(),
       role: "user",
-      content: content.trim(),
+      content: trimmed || (attachment ? `[Attached: ${attachment.fileName}]` : ""),
+      mediaType: attachment?.type === "image" ? "image" : undefined,
+      mediaUrl: attachment?.type === "image" ? attachment.dataUrl : undefined,
       created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
     const currentChat = chats.find((c) => c.id === targetChatId);
     const isFirst = !currentChat || currentChat.messages.length === 0;
-    const words = content.trim().split(" ");
+    const words = (trimmed || (attachment ? attachment.fileName : "")).split(" ");
     const autoTitle = isFirst ? (words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")) : currentChat.title;
 
     setChats((prev) =>
@@ -397,11 +441,19 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setIsSending(true);
 
+    if (isGuest) {
+      const nextCount = guestMsgCount + 1;
+      setGuestMsgCount(nextCount);
+      try {
+        localStorage.setItem("autonexis_guest_msg_count", nextCount.toString());
+      } catch {}
+    }
+
     if (isImageRequest) {
-      const imagePrompt = content
+      const imagePrompt = trimmed
         .replace(/(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)\s+(?:of\s+)?/i, "")
         .replace(/(?:photo|image|tasveer)\s+(?:banao|karo|bana\s+do)/i, "")
-        .trim() || content.trim();
+        .trim() || trimmed;
 
       const seed = Math.floor(Math.random() * 900000) + 100000;
       const generatedImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=1024&height=768&nologo=true&private=true&seed=${seed}`;
@@ -434,10 +486,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     if (isVideoRequest) {
-      const videoPrompt = content
+      const videoPrompt = trimmed
         .replace(/(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)?/i, "")
         .replace(/(?:video)\s+(?:banao|karo|bana\s+do)/i, "")
-        .trim() || content.trim();
+        .trim() || trimmed;
 
       setTimeout(() => {
         const assistantMsg: MessageItem = {
@@ -484,7 +536,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
 
     // Strict Language Mirroring Detection
-    const hasDevanagari = /[\u0900-\u097F]/.test(content);
+    const hasDevanagari = /[\u0900-\u097F]/.test(trimmed);
     const hinglishMarkers = [
       "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
       "naam", "nam", "kaise", "kaisa", "kaisi", "batao", "bataiye", "bol", "bolo", "bolna",
@@ -494,31 +546,31 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       "apne", "apni", "aap", "tum", "tu", "kyu", "kyun", "kaha", "kahan", "kab", "kaun",
       "kaam", "baat", "bata", "rakho", "rakh", "dekh", "dekho", "suno", "sun", "paas", "bhi"
     ];
-    const inputWords = content.toLowerCase().split(/[\s,?.!;:()"]+/);
+    const inputWords = trimmed.toLowerCase().split(/[\s,?.!;:()"]+/);
     const isHinglish = !hasDevanagari && inputWords.some((w) => hinglishMarkers.includes(w));
 
     if (hasDevanagari) {
       memoryPrompt += `\nLANGUAGE MANDATE: User is writing in Devanagari Hindi. Reply naturally in Hindi using Devanagari script.\n`;
     } else if (isHinglish) {
-      memoryPrompt += `\nLANGUAGE MANDATE (CRITICAL): User is writing in HINGLISH (Hindi typed in English letters, e.g. "${content}"). You MUST reply in natural, friendly HINGLISH using English/Roman alphabet (e.g. "Main badhiya hoon! Aap batao, sab kaisa chal raha hai?"). NEVER reply in Devanagari Hindi!\n`;
+      memoryPrompt += `\nLANGUAGE MANDATE (CRITICAL): User is writing in HINGLISH (Hindi typed in English letters, e.g. "${trimmed}"). You MUST reply in natural, friendly HINGLISH using English/Roman alphabet (e.g. "Main badhiya hoon! Aap batao, sab kaisa chal raha hai?"). NEVER reply in Devanagari Hindi!\n`;
     } else {
       memoryPrompt += `\nLANGUAGE MANDATE: User is writing in English. Reply completely in natural, fluent English.\n`;
     }
 
     if (extractedName) {
-      memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${content}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
+      memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${trimmed}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
     }
 
     // Detect if user asks what their name is
-    const asksForName = /(?:mera|apna)\s+(?:naam|name|nam)\s+(?:kya|batao)|what(?:\s+is|\s*'s)\s+my\s+name|who\s+am\s+i/i.test(content);
+    const asksForName = /(?:mera|apna)\s+(?:naam|name|nam)\s+(?:kya|batao)|what(?:\s+is|\s*'s)\s+my\s+name|who\s+am\s+i/i.test(trimmed);
     if (asksForName) {
-      memoryPrompt += `CRITICAL INSTRUCTION: The user is explicitly asking for their name ("${content}"). Their remembered name is "${effectiveUserName}". Answer them directly, warmly, and accurately that their name is "${effectiveUserName}".\n`;
+      memoryPrompt += `CRITICAL INSTRUCTION: The user is explicitly asking for their name ("${trimmed}"). Their remembered name is "${effectiveUserName}". Answer them directly, warmly, and accurately that their name is "${effectiveUserName}".\n`;
     }
 
     // Detect if user asks about past chats / previous conversations
-    const asksAboutPastChats = /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation|cheto|chizo|kya\s+baat)|tujhe\s+yaad\s+hai|kya\s+yaad\s+hai|do\s+you\s+remember/i.test(content);
+    const asksAboutPastChats = /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation|cheto|chizo|kya\s+baat)|tujhe\s+yaad\s+hai|kya\s+yaad\s+hai|do\s+you\s+remember/i.test(trimmed);
     if (asksAboutPastChats) {
-      memoryPrompt += `\nCRITICAL DIRECTIVE: The user is explicitly asking about their past conversations ("${content}"). You MUST review the past conversations listed below and summarize clearly, warmly, and accurately what they discussed with you in previous chats. Never claim you forgot or cannot see past chats.\n`;
+      memoryPrompt += `\nCRITICAL DIRECTIVE: The user is explicitly asking about their past conversations ("${trimmed}"). You MUST review the past conversations listed below and summarize clearly, warmly, and accurately what they discussed with you in previous chats. Never claim you forgot or cannot see past chats.\n`;
     }
 
     if (allFacts.length > 0) {
@@ -533,7 +585,19 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       role: m.role,
       content: m.content,
     }));
-    historyPayload.push({ role: "user", content: content.trim() });
+
+    if (attachment?.type === "image" && attachment.dataUrl) {
+      const parts: MultimodalPart[] = [
+        { type: "text", text: trimmed || "What is in this image? Explain and describe it." },
+        { type: "image_url", image_url: { url: attachment.dataUrl } }
+      ];
+      historyPayload.push({ role: "user", content: parts });
+    } else if (attachment?.type === "file" && attachment.textContent) {
+      const fullText = `[Attached: ${attachment.fileName}]\n\`\`\`\n${attachment.textContent}\n\`\`\`\n\n${trimmed}`;
+      historyPayload.push({ role: "user", content: fullText });
+    } else {
+      historyPayload.push({ role: "user", content: trimmed });
+    }
 
     const assistantMsgId = "ast_" + Date.now();
     let accumulatedContent = "";
@@ -586,7 +650,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         // onError fallback
         async () => {
           if (!accumulatedContent) {
-            const reply = await postChatMessage(historyPayload, memoryPrompt);
+            const reply = await postChatMessage(historyPayload, memoryPrompt, isGuest);
             setChats((prev) =>
               prev.map((c) => {
                 if (c.id === targetChatId) {
@@ -602,7 +666,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             );
           }
           setIsSending(false);
-        }
+        },
+        isGuest
       );
     } catch {
       setIsSending(false);
@@ -625,6 +690,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updateCallName,
         sendMessage,
         isSending,
+        guestMsgCount,
+        guestMessagesRemaining,
+        showGuestLimitModal,
+        setShowGuestLimitModal,
       }}
     >
       {children}

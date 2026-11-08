@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
-import { useChats, type ChatItem, type MessageItem } from "../state/chats";
+import { useChats, type ChatItem, type MessageItem, type AttachmentPayload } from "../state/chats";
 import { useAuth } from "../state/auth";
 import { Logo } from "../components/Logo";
 import { SettingsModal } from "../components/SettingsModal";
 import { UserMenuDropdown, type SettingsTabId } from "../components/UserMenuDropdown";
+import { MarkdownRenderer } from "../components/MarkdownRenderer";
+import { isImageFile, isTextFile, resizeImageToDataUrl, readTextFile } from "../utils/fileHelpers";
 import {
   ImageCreationCard,
   VideoCreationCard,
@@ -23,7 +25,6 @@ import {
   IconVolume,
   IconImage,
   IconVideo,
-  IconPaperclip,
   IconFolder,
   IconFileText,
   IconSparkles,
@@ -48,6 +49,9 @@ export const ChatScreen: React.FC = () => {
     deleteChat,
     sendMessage,
     isSending,
+    guestMessagesRemaining,
+    showGuestLimitModal,
+    setShowGuestLimitModal,
   } = useChats();
 
   const { user, isGuest, setIsAuthScreenVisible, logout } = useAuth();
@@ -70,9 +74,11 @@ export const ChatScreen: React.FC = () => {
   const [autoSpeak, setAutoSpeak] = useState(false);
   const recognitionRef = useRef<any>(null);
 
-  // File Attachment Reference
+  // File & Image Attachment States
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
+  const [attachedImage, setAttachedImage] = useState<{ dataUrl: string; fileName: string } | null>(null);
+  const [attachedFile, setAttachedFile] = useState<{ textContent: string; fileName: string } | null>(null);
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -185,17 +191,41 @@ export const ChatScreen: React.FC = () => {
   }, [inputContent]);
 
   const handleSend = async () => {
-    if (!inputContent.trim() || isSending) return;
-    let textToSend = inputContent.trim();
-    if (attachedFileName) {
-      textToSend = `[Attached: ${attachedFileName}] ${textToSend}`;
-      setAttachedFileName(null);
+    if ((!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile) return;
+
+    if (isGuest && guestMessagesRemaining <= 0) {
+      setShowGuestLimitModal(true);
+      return;
     }
+
+    const textToSend = inputContent.trim();
+    const curImage = attachedImage;
+    const curFile = attachedFile;
+
     setInputContent("");
+    setAttachedImage(null);
+    setAttachedFile(null);
+
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-    await sendMessage(textToSend, inputMode);
+
+    let attachmentPayload: AttachmentPayload | null = null;
+    if (curImage) {
+      attachmentPayload = {
+        type: "image",
+        dataUrl: curImage.dataUrl,
+        fileName: curImage.fileName,
+      };
+    } else if (curFile) {
+      attachmentPayload = {
+        type: "file",
+        textContent: curFile.textContent,
+        fileName: curFile.fileName,
+      };
+    }
+
+    await sendMessage(textToSend, inputMode, attachmentPayload);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -211,10 +241,36 @@ export const ChatScreen: React.FC = () => {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setAttachedFileName(file.name);
+    if (!file) return;
+
+    if (isGuest) {
+      setShowGuestLimitModal(true);
+      e.target.value = "";
+      return;
+    }
+
+    try {
+      setIsProcessingFile(true);
+      if (isImageFile(file)) {
+        const dataUrl = await resizeImageToDataUrl(file);
+        setAttachedImage({ dataUrl, fileName: file.name });
+        setAttachedFile(null);
+      } else if (isTextFile(file)) {
+        const text = await readTextFile(file);
+        setAttachedFile({ textContent: text, fileName: file.name });
+        setAttachedImage(null);
+      } else {
+        const text = await readTextFile(file);
+        setAttachedFile({ textContent: text, fileName: file.name });
+        setAttachedImage(null);
+      }
+    } catch (err) {
+      console.error("[AUTONEXIS] Attachment processing error:", err);
+    } finally {
+      setIsProcessingFile(false);
+      e.target.value = "";
     }
   };
 
@@ -452,7 +508,13 @@ export const ChatScreen: React.FC = () => {
               <IconVolume size={18} />
             </button>
 
-            {/* If in Guest mode, show quick Sign In button */}
+            {/* If in Guest mode, show remaining messages pill and sign in */}
+            {isGuest && (
+              <div className="guest-counter-pill" title="Free guest messages remaining">
+                <span>Guest ({guestMessagesRemaining} left)</span>
+              </div>
+            )}
+
             {isGuest && (
               <button
                 type="button"
@@ -478,6 +540,15 @@ export const ChatScreen: React.FC = () => {
             </button>
           </div>
         </header>
+
+        {/* Hidden File Input for Image & Code Uploads */}
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleFileUpload}
+          accept="image/*,.txt,.md,.csv,.json,.js,.ts,.tsx,.py,.html,.css,.sql,.sh,.yaml,.yml,.env,.log"
+          style={{ display: "none" }}
+        />
 
         {/* Scrollable Conversation / Home Area */}
         <main className="chat-conversation-area">
@@ -516,34 +587,58 @@ export const ChatScreen: React.FC = () => {
                   className="chat-input-textarea"
                 />
 
-                {attachedFileName && (
-                  <div className="attachment-indicator-pill">
-                    <IconPaperclip size={12} />
-                    <span>{attachedFileName}</span>
+                {/* Attached Image Thumbnail Preview */}
+                {attachedImage && (
+                  <div className="attachment-indicator-pill attached-image-indicator">
+                    <img src={attachedImage.dataUrl} alt="Thumbnail preview" className="input-thumb-preview" />
+                    <span className="attachment-filename">{attachedImage.fileName}</span>
                     <button
                       type="button"
-                      onClick={() => setAttachedFileName(null)}
+                      onClick={() => setAttachedImage(null)}
                       className="attachment-remove-btn"
+                      aria-label="Remove image"
                     >
                       ✕
                     </button>
                   </div>
                 )}
 
+                {/* Attached Text/Code File Preview */}
+                {attachedFile && (
+                  <div className="attachment-indicator-pill">
+                    <IconFileText size={13} />
+                    <span className="attachment-filename">{attachedFile.fileName}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAttachedFile(null)}
+                      className="attachment-remove-btn"
+                      aria-label="Remove file"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {isProcessingFile && (
+                  <div className="attachment-indicator-pill">
+                    <span className="attachment-filename">Optimizing attachment...</span>
+                  </div>
+                )}
+
                 <div className="chat-input-card-bottom">
                   <div className="input-toolbar-left">
                     {/* File Attachment Button */}
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handleFileUpload}
-                      style={{ display: "none" }}
-                    />
                     <button
                       type="button"
                       className="input-tool-icon-btn"
-                      onClick={() => fileInputRef.current?.click()}
-                      title="Attach file or image"
+                      onClick={() => {
+                        if (isGuest) {
+                          setShowGuestLimitModal(true);
+                          return;
+                        }
+                        fileInputRef.current?.click();
+                      }}
+                      title={isGuest ? "Log in to attach images & files" : "Attach image or code file"}
                       aria-label="Attach file"
                     >
                       <IconPlus size={16} />
@@ -640,7 +735,7 @@ export const ChatScreen: React.FC = () => {
                     <button
                       type="button"
                       className="chat-send-btn"
-                      disabled={!inputContent.trim() || isSending}
+                      disabled={(!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile}
                       onClick={handleSend}
                       aria-label="Send message"
                       title="Send message (Enter)"
@@ -751,8 +846,21 @@ export const ChatScreen: React.FC = () => {
                       )}
 
                       <div className={`message-bubble-box ${isUser ? "user-box" : "assistant-box"}`}>
-                        {/* 1. Image Studio Card if mediaType is image */}
-                        {msg.mediaType === "image" && (
+                        {/* User uploaded image thumbnail */}
+                        {isUser && msg.mediaType === "image" && msg.mediaUrl && (
+                          <div className="user-uploaded-image-wrapper">
+                            <img
+                              src={msg.mediaUrl}
+                              alt="Uploaded attachment"
+                              className="user-uploaded-img"
+                              onClick={() => window.open(msg.mediaUrl, "_blank")}
+                              title="Click to view full size"
+                            />
+                          </div>
+                        )}
+
+                        {/* 1. Assistant Image Studio Card if mediaType is image */}
+                        {!isUser && msg.mediaType === "image" && (
                           <ImageCreationCard
                             prompt={msg.mediaPrompt || msg.content}
                             imageUrl={msg.mediaUrl}
@@ -767,8 +875,14 @@ export const ChatScreen: React.FC = () => {
                           />
                         )}
 
-                        {/* 3. Text Content */}
-                        {msg.content && msg.mediaType !== "image" && msg.mediaType !== "video" && (
+                        {/* 3. Text Content: Assistant uses MarkdownRenderer, User uses plain text */}
+                        {!isUser && msg.content && (
+                          <div className="message-text-content">
+                            <MarkdownRenderer content={msg.content} />
+                          </div>
+                        )}
+
+                        {isUser && msg.content && (
                           <div className="message-text-content">
                             {msg.content}
                           </div>
@@ -851,34 +965,58 @@ export const ChatScreen: React.FC = () => {
                 className="chat-input-textarea"
               />
 
-              {attachedFileName && (
-                <div className="attachment-indicator-pill">
-                  <IconPaperclip size={12} />
-                  <span>{attachedFileName}</span>
+              {/* Attached Image Thumbnail Preview */}
+              {attachedImage && (
+                <div className="attachment-indicator-pill attached-image-indicator">
+                  <img src={attachedImage.dataUrl} alt="Thumbnail preview" className="input-thumb-preview" />
+                  <span className="attachment-filename">{attachedImage.fileName}</span>
                   <button
                     type="button"
-                    onClick={() => setAttachedFileName(null)}
+                    onClick={() => setAttachedImage(null)}
                     className="attachment-remove-btn"
+                    aria-label="Remove image"
                   >
                     ✕
                   </button>
                 </div>
               )}
 
+              {/* Attached Text/Code File Preview */}
+              {attachedFile && (
+                <div className="attachment-indicator-pill">
+                  <IconFileText size={13} />
+                  <span className="attachment-filename">{attachedFile.fileName}</span>
+                  <button
+                    type="button"
+                    onClick={() => setAttachedFile(null)}
+                    className="attachment-remove-btn"
+                    aria-label="Remove file"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {isProcessingFile && (
+                <div className="attachment-indicator-pill">
+                  <span className="attachment-filename">Optimizing attachment...</span>
+                </div>
+              )}
+
               <div className="chat-input-card-bottom">
                 <div className="input-toolbar-left">
-                  {/* File Attachment */}
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileUpload}
-                    style={{ display: "none" }}
-                  />
+                  {/* File Attachment Button */}
                   <button
                     type="button"
                     className="input-tool-icon-btn"
-                    onClick={() => fileInputRef.current?.click()}
-                    title="Attach file"
+                    onClick={() => {
+                      if (isGuest) {
+                        setShowGuestLimitModal(true);
+                        return;
+                      }
+                      fileInputRef.current?.click();
+                    }}
+                    title={isGuest ? "Log in to attach images & files" : "Attach image or code file"}
                     aria-label="Attach file"
                   >
                     <IconPlus size={16} />
@@ -975,7 +1113,7 @@ export const ChatScreen: React.FC = () => {
                   <button
                     type="button"
                     className="chat-send-btn"
-                    disabled={!inputContent.trim() || isSending}
+                    disabled={(!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile}
                     onClick={handleSend}
                     aria-label="Send message"
                     title="Send (Enter)"
@@ -995,6 +1133,40 @@ export const ChatScreen: React.FC = () => {
         onClose={() => setIsSettingsOpen(false)}
         initialTab={settingsTab}
       />
+
+      {/* Calm Guest Limit Modal */}
+      {showGuestLimitModal && (
+        <div className="modal-backdrop" onClick={() => setShowGuestLimitModal(false)}>
+          <div className="guest-limit-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="guest-modal-icon">
+              <img src="/logo_icon.png?v=20261107" alt="AUTONEXIS" style={{ width: 44, height: 44 }} />
+            </div>
+            <h3 className="guest-modal-title">Log in to continue</h3>
+            <p className="guest-modal-desc">
+              You've reached your free 5 guest messages. Sign in with your Google or email account to unlock unlimited messaging, multimodal image understanding, and persistent memory.
+            </p>
+            <div className="guest-modal-actions">
+              <button
+                type="button"
+                className="guest-modal-login-btn"
+                onClick={() => {
+                  setShowGuestLimitModal(false);
+                  setIsAuthScreenVisible(true);
+                }}
+              >
+                Sign In / Create Account
+              </button>
+              <button
+                type="button"
+                className="guest-modal-close-btn"
+                onClick={() => setShowGuestLimitModal(false)}
+              >
+                Maybe later
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
