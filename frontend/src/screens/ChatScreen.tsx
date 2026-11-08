@@ -54,7 +54,7 @@ export const ChatScreen: React.FC = () => {
     setShowGuestLimitModal,
   } = useChats();
 
-  const { user, isGuest, setIsAuthScreenVisible, logout } = useAuth();
+  const { user, firebaseUser, isGuest, setIsAuthScreenVisible, logout } = useAuth();
 
   // Input & UI States
   const [inputContent, setInputContent] = useState("");
@@ -432,7 +432,7 @@ export const ChatScreen: React.FC = () => {
           <div className="user-profile-left">
             <div className="user-avatar-circle">
               <img
-                src={localStorage.getItem("autonexis_user_avatar") || "/logo_circle.png?v=20261107"}
+                src={firebaseUser?.photoURL || "/logo_circle.png?v=20261107"}
                 alt="User"
                 className="user-avatar-img"
               />

@@ -7,8 +7,12 @@ import google.auth.transport.requests
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.config import settings
-from backend.database import User, get_db
+try:
+    from config import settings
+    from database import User, get_db
+except ImportError:
+    from backend.config import settings
+    from backend.database import User, get_db
 
 logger = logging.getLogger("autonexis.auth")
 security = HTTPBearer(auto_error=False)

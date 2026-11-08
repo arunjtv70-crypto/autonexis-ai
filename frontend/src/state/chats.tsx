@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import {
   postChatMessage,
   streamChatMessage,
@@ -32,12 +32,12 @@ export interface ChatItem {
   messages: MessageItem[];
 }
 
-interface UserMemoryStore {
+export interface UserMemoryStore {
   userName?: string;
   facts: string[];
 }
 
-interface ChatsContextType {
+export interface ChatsContextType {
   chats: ChatItem[];
   activeChatId: string | null;
   activeChat: ChatItem | null;
@@ -61,12 +61,79 @@ interface ChatsContextType {
   setShowGuestLimitModal: (show: boolean) => void;
 }
 
-const CHATS_STORAGE_KEY = "autonexis_saved_chats";
-const MEMORY_STORAGE_KEY = "autonexis_user_memories";
+// One-time legacy cleanup to permanently erase un-namespaced shared keys
+const LEGACY_CLEANUP_KEY = "autonexis_legacy_v2_cleaned";
+if (typeof window !== "undefined") {
+  try {
+    if (!localStorage.getItem(LEGACY_CLEANUP_KEY)) {
+      localStorage.removeItem("autonexis_saved_chats");
+      localStorage.removeItem("autonexis_user_memories");
+      localStorage.removeItem("autonexis_user_avatar");
+      localStorage.removeItem("autonexis_guest_msg_count");
+      localStorage.setItem(LEGACY_CLEANUP_KEY, "true");
+    }
+  } catch {}
+}
+
+// User-namespaced storage key helpers
+function getChatsStorageKey(uid: string | null): string {
+  if (!uid) return "autonexis:guest:chats";
+  return `autonexis:${uid}:chats`;
+}
+
+function getMemoryStorageKey(uid: string | null): string {
+  if (!uid) return "autonexis:guest:memory";
+  return `autonexis:${uid}:memory`;
+}
+
+function getActiveChatIdKey(uid: string | null): string {
+  if (!uid) return "autonexis:guest:active_chat_id";
+  return `autonexis:${uid}:active_chat_id`;
+}
+
+const GUEST_MSG_COUNT_KEY = "autonexis:guest:msg_count";
+
+function createEmptyChat(): ChatItem {
+  return {
+    id: "chat-" + Date.now(),
+    title: "New Chat",
+    updated_at: "Just now",
+    messages: [],
+  };
+}
+
+function loadStoredChats(uid: string | null): ChatItem[] {
+  if (!uid) return [createEmptyChat()];
+  try {
+    const raw = localStorage.getItem(getChatsStorageKey(uid));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {}
+  return [createEmptyChat()];
+}
+
+function loadStoredMemory(uid: string | null, fallbackName: string): UserMemoryStore {
+  if (!uid) return { userName: fallbackName, facts: [] };
+  try {
+    const raw = localStorage.getItem(getMemoryStorageKey(uid));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        userName: parsed.userName || fallbackName,
+        facts: Array.isArray(parsed.facts) ? parsed.facts : [],
+      };
+    }
+  } catch {}
+  return { userName: fallbackName, facts: [] };
+}
 
 const ChatsContext = createContext<ChatsContextType | undefined>(undefined);
 
-// Helper function to extract any personal facts mentioned across all chats
+// Helper function to extract personal facts mentioned across chats
 function extractAllFactsFromChats(allChats: ChatItem[]): string[] {
   const factsSet = new Set<string>();
 
@@ -99,7 +166,6 @@ function extractAllFactsFromChats(allChats: ChatItem[]): string[] {
 
 // Function to build rich cross-chat memory and summaries
 function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | null): string {
-  // Filter other chats that have messages
   const pastChats = allChats.filter((c) => c.id !== currentId && c.messages && c.messages.length > 0);
   if (pastChats.length === 0) return "";
 
@@ -107,7 +173,6 @@ function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | nul
   sections.push("[CROSS-CHAT MEMORY - PREVIOUS CONVERSATIONS WITH THIS USER]:");
   sections.push("Below is what the user talked about in their other previous chats. You MUST remember these facts, topics, and discussions if the user asks about them or refers to past chats:\n");
 
-  // Include up to 6 recent past chats
   const recentPast = pastChats.slice(0, 6);
 
   recentPast.forEach((pc, idx) => {
@@ -134,93 +199,181 @@ function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | nul
 
 export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isGuest, updateProfileName } = useAuth();
+  const currentUid = user?.id || (isGuest ? "guest" : null);
+
+  // References to actively track current UID and abort in-flight streams on switch
+  const activeUidRef = useRef<string | null>(currentUid);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [guestMsgCount, setGuestMsgCount] = useState<number>(() => {
-    return parseInt(localStorage.getItem("autonexis_guest_msg_count") || "0", 10);
+    try {
+      return parseInt(localStorage.getItem(GUEST_MSG_COUNT_KEY) || "0", 10);
+    } catch {
+      return 0;
+    }
   });
   const [showGuestLimitModal, setShowGuestLimitModal] = useState<boolean>(false);
   const guestMessagesRemaining = Math.max(0, 5 - guestMsgCount);
 
   // Load persistent cross-chat memory
   const [memory, setMemory] = useState<UserMemoryStore>(() => {
-    try {
-      const stored = localStorage.getItem(MEMORY_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return {
-          userName: parsed.userName || (user?.display_name && user.display_name !== "User" ? user.display_name : "User"),
-          facts: Array.isArray(parsed.facts) ? parsed.facts : [],
-        };
-      }
-    } catch {
-      // Ignore
-    }
-    return {
-      userName: user?.display_name && user.display_name !== "User" ? user.display_name : "User",
-      facts: [],
-    };
+    const defName = user?.display_name && user.display_name !== "User" ? user.display_name : "User";
+    return loadStoredMemory(currentUid, defName);
   });
 
   // Load saved chats
   const [chats, setChats] = useState<ChatItem[]>(() => {
-    try {
-      const stored = localStorage.getItem(CHATS_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch {
-      // Storage error
-    }
-    return [
-      {
-        id: "chat-" + Date.now(),
-        title: "New Chat",
-        updated_at: "Just now",
-        messages: [],
-      },
-    ];
+    return loadStoredChats(currentUid);
   });
 
   const [activeChatId, setActiveChatId] = useState<string | null>(() => {
-    return chats.length > 0 ? chats[0].id : null;
+    const initialChats = loadStoredChats(currentUid);
+    if (!currentUid) return initialChats[0]?.id || null;
+    try {
+      const saved = localStorage.getItem(getActiveChatIdKey(currentUid));
+      if (saved && initialChats.some((c) => c.id === saved)) {
+        return saved;
+      }
+    } catch {}
+    return initialChats[0]?.id || null;
   });
 
   const [isSending, setIsSending] = useState(false);
 
-  // Sync memory to localStorage
+  // Immediate account-switching effect: abort streams, reset memory, load user's isolated data
   useEffect(() => {
-    try {
-      localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(memory));
-    } catch {
-      // Storage error
-    }
-  }, [memory]);
+    if (activeUidRef.current !== currentUid) {
+      // 1. Immediately abort any in-flight stream
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      setIsSending(false);
 
-  // Sync chats to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify(chats));
-    } catch {
-      // Storage error
+      // 2. Update active UID ref
+      activeUidRef.current = currentUid;
+
+      // 3. Clear and reload user-specific data
+      const loaded = loadStoredChats(currentUid);
+      setChats(loaded);
+
+      let targetActiveId: string | null = loaded[0]?.id || null;
+      if (currentUid) {
+        try {
+          const saved = localStorage.getItem(getActiveChatIdKey(currentUid));
+          if (saved && loaded.some((c) => c.id === saved)) {
+            targetActiveId = saved;
+          }
+        } catch {}
+      }
+      setActiveChatId(targetActiveId);
+
+      const defName = user?.display_name && user.display_name !== "User" ? user.display_name : "User";
+      setMemory(loadStoredMemory(currentUid, defName));
+
+      if (currentUid === "guest") {
+        try {
+          setGuestMsgCount(parseInt(localStorage.getItem(GUEST_MSG_COUNT_KEY) || "0", 10));
+        } catch {
+          setGuestMsgCount(0);
+        }
+      }
     }
-  }, [chats]);
+  }, [currentUid, user?.display_name]);
+
+  // Sync memory to user-namespaced storage
+  useEffect(() => {
+    if (!currentUid) return;
+    try {
+      localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(memory));
+    } catch {}
+  }, [memory, currentUid]);
+
+  // Sync chats to user-namespaced storage
+  useEffect(() => {
+    if (!currentUid) return;
+    try {
+      localStorage.setItem(getChatsStorageKey(currentUid), JSON.stringify(chats));
+    } catch {}
+  }, [chats, currentUid]);
+
+  // Sync activeChatId to user-namespaced storage
+  useEffect(() => {
+    if (!currentUid) return;
+    try {
+      if (activeChatId) {
+        localStorage.setItem(getActiveChatIdKey(currentUid), activeChatId);
+      } else {
+        localStorage.removeItem(getActiveChatIdKey(currentUid));
+      }
+    } catch {}
+  }, [activeChatId, currentUid]);
+
+  // Multi-tab synchronization via BroadcastChannel and storage events
+  useEffect(() => {
+    let channel: BroadcastChannel | null = null;
+
+    const handleSync = (type: string, uid?: string | null) => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      setIsSending(false);
+
+      const targetUid = uid !== undefined ? uid : null;
+      if (targetUid !== activeUidRef.current) {
+        activeUidRef.current = targetUid;
+        const loaded = loadStoredChats(targetUid);
+        setChats(loaded);
+        setActiveChatId(loaded[0]?.id || null);
+        setMemory(loadStoredMemory(targetUid, "User"));
+      }
+    };
+
+    if (typeof BroadcastChannel !== "undefined") {
+      try {
+        channel = new BroadcastChannel("autonexis_auth_sync");
+        channel.onmessage = (event) => {
+          if (event.data?.type === "LOGOUT") {
+            handleSync("LOGOUT", null);
+          } else if (event.data?.type === "AUTH_CHANGED") {
+            handleSync("AUTH_CHANGED", event.data.uid || null);
+          }
+        };
+      } catch {}
+    }
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "autonexis_auth_sync_event") {
+        try {
+          const parsed = JSON.parse(e.newValue || "{}");
+          if (parsed?.type === "LOGOUT") {
+            handleSync("LOGOUT", null);
+          } else if (parsed?.type === "AUTH_CHANGED") {
+            handleSync("AUTH_CHANGED", parsed.uid || null);
+          }
+        } catch {}
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      if (channel) {
+        try {
+          channel.close();
+        } catch {}
+      }
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
 
   const createNewChat = (): string => {
-    const newId = "chat-" + Date.now();
-    const newChat: ChatItem = {
-      id: newId,
-      title: "New Chat",
-      updated_at: "Just now",
-      messages: [],
-    };
-    setChats((prev) => [newChat, ...prev]);
-    setActiveChatId(newId);
-    return newId;
+    const freshChat = createEmptyChat();
+    setChats((prev) => [freshChat, ...prev]);
+    setActiveChatId(freshChat.id);
+    return freshChat.id;
   };
 
   const selectChat = (id: string) => {
@@ -234,14 +387,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (remaining.length > 0) {
           setActiveChatId(remaining[0].id);
         } else {
-          const freshId = "chat-" + Date.now();
-          const freshChat: ChatItem = {
-            id: freshId,
-            title: "New Chat",
-            updated_at: "Just now",
-            messages: [],
-          };
-          setActiveChatId(freshId);
+          const freshChat = createEmptyChat();
+          setActiveChatId(freshChat.id);
           return [freshChat];
         }
       }
@@ -256,18 +403,15 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const clearAllChats = () => {
-    const freshId = "chat-" + Date.now();
-    const freshChat: ChatItem = {
-      id: freshId,
-      title: "New Chat",
-      updated_at: "Just now",
-      messages: [],
-    };
+    const freshChat = createEmptyChat();
     setChats([freshChat]);
-    setActiveChatId(freshId);
-    try {
-      localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify([freshChat]));
-    } catch {}
+    setActiveChatId(freshChat.id);
+    if (currentUid) {
+      try {
+        localStorage.setItem(getChatsStorageKey(currentUid), JSON.stringify([freshChat]));
+        localStorage.setItem(getActiveChatIdKey(currentUid), freshChat.id);
+      } catch {}
+    }
   };
 
   const resetMemory = () => {
@@ -276,9 +420,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       facts: [],
     };
     setMemory(freshMemory);
-    try {
-      localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(freshMemory));
-    } catch {}
+    if (currentUid) {
+      try {
+        localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(freshMemory));
+      } catch {}
+    }
   };
 
   const updateCallName = (name: string) => {
@@ -286,9 +432,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!clean) return;
     setMemory((prev) => {
       const updated = { ...prev, userName: clean };
-      try {
-        localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      if (currentUid) {
+        try {
+          localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(updated));
+        } catch {}
+      }
       return updated;
     });
   };
@@ -328,9 +476,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (extractedName) {
       setMemory((prev) => {
         const updated = { ...prev, userName: extractedName };
-        try {
-          localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
-        } catch {}
+        if (currentUid) {
+          try {
+            localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(updated));
+          } catch {}
+        }
         return updated;
       });
       updateProfileName(extractedName);
@@ -345,9 +495,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setMemory((prev) => {
           if (!prev.facts.includes(newFact!)) {
             const updated = { ...prev, facts: [...prev.facts, newFact!] };
-            try {
-              localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
-            } catch {}
+            if (currentUid) {
+              try {
+                localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(updated));
+              } catch {}
+            }
             return updated;
           }
           return prev;
@@ -362,9 +514,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setMemory((prev) => {
         if (!prev.facts.includes(newFact!)) {
           const updated = { ...prev, facts: [...prev.facts, newFact!] };
-          try {
-            localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(updated));
-          } catch {}
+          if (currentUid) {
+            try {
+              localStorage.setItem(getMemoryStorageKey(currentUid), JSON.stringify(updated));
+            } catch {}
+          }
           return updated;
         }
         return prev;
@@ -445,7 +599,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const nextCount = guestMsgCount + 1;
       setGuestMsgCount(nextCount);
       try {
-        localStorage.setItem("autonexis_guest_msg_count", nextCount.toString());
+        localStorage.setItem(GUEST_MSG_COUNT_KEY, nextCount.toString());
       } catch {}
     }
 
@@ -622,12 +776,24 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
     );
 
+    // Setup abort controller and save calling UID
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const requestUid = currentUid;
+
     try {
       await streamChatMessage(
         historyPayload,
         memoryPrompt,
         // onChunk
         (chunk) => {
+          // Discard late response if user switched account or logged out
+          if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            return;
+          }
           accumulatedContent += chunk;
           setChats((prev) =>
             prev.map((c) => {
@@ -645,29 +811,42 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         },
         // onDone
         () => {
+          if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            return;
+          }
           setIsSending(false);
         },
         // onError fallback
         async () => {
+          if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            setIsSending(false);
+            return;
+          }
           if (!accumulatedContent) {
-            const reply = await postChatMessage(historyPayload, memoryPrompt, isGuest);
-            setChats((prev) =>
-              prev.map((c) => {
-                if (c.id === targetChatId) {
-                  return {
-                    ...c,
-                    messages: c.messages.map((m) =>
-                      m.id === assistantMsgId ? { ...m, content: reply } : m
-                    ),
-                  };
-                }
-                return c;
-              })
-            );
+            try {
+              const reply = await postChatMessage(historyPayload, memoryPrompt, isGuest);
+              if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+                return;
+              }
+              setChats((prev) =>
+                prev.map((c) => {
+                  if (c.id === targetChatId) {
+                    return {
+                      ...c,
+                      messages: c.messages.map((m) =>
+                        m.id === assistantMsgId ? { ...m, content: reply } : m
+                      ),
+                    };
+                  }
+                  return c;
+                })
+              );
+            } catch {}
           }
           setIsSending(false);
         },
-        isGuest
+        isGuest,
+        controller.signal
       );
     } catch {
       setIsSending(false);

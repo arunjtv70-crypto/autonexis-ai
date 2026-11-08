@@ -17,6 +17,9 @@ router = APIRouter(prefix="/api/chats", tags=["Chat History"])
 class CreateChatRequest(BaseModel):
     title: Optional[str] = "नई बातचीत"
 
+class RenameChatRequest(BaseModel):
+    title: str = Field(..., description="नया शीर्षक")
+
 class SendMessageRequest(BaseModel):
     content: Union[str, List[Dict[str, Any]]] = Field(..., description="मैसेज सामग्री")
 
@@ -118,6 +121,28 @@ async def get_chat_details(
             for m in chat.messages
         ]
     }
+
+# 3b. Rename chat
+@router.patch("/{chat_id}")
+async def rename_chat(
+    chat_id: str,
+    req: RenameChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id)
+    result = await db.execute(stmt)
+    chat = result.scalars().first()
+
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="चैट नहीं मिली।")
+
+    chat.title = req.title.strip() or chat.title
+    chat.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(chat)
+
+    return {"status": "success", "id": chat.id, "title": chat.title}
 
 # 4. Delete single chat
 @router.delete("/{chat_id}")

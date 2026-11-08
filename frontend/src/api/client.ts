@@ -92,7 +92,8 @@ export async function streamChatMessage(
   onChunk: (token: string) => void,
   onDone: () => void,
   onError: (err: any) => void,
-  isGuest = false
+  isGuest = false,
+  signal?: AbortSignal
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
@@ -100,6 +101,7 @@ export async function streamChatMessage(
     const res = await fetch(url, {
       method: "POST",
       headers,
+      signal,
       body: JSON.stringify({
         messages,
         user_memory: userMemory || undefined,
@@ -161,7 +163,11 @@ export async function streamChatMessage(
         }
       }
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      // Stream aborted intentionally during account switch or logout
+      return;
+    }
     onError(err);
   }
 }

@@ -16,7 +16,8 @@ from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from config import settings
-from database import init_db, User, get_db
+from database import init_db, User, Chat, get_db
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from auth_utils import get_current_user, security
 from llm_client import llm_client
@@ -101,6 +102,11 @@ async def chat_direct(
         client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
         check_guest_rate_limit(client_ip)
 
+        if req.chat_id:
+            res_chk = await db.execute(select(Chat).where(Chat.id == req.chat_id))
+            if res_chk.scalars().first():
+                raise HTTPException(status_code=404, detail="चैट नहीं मिली।")
+
         for m in req.messages:
             if m.role == "user":
                 if isinstance(m.content, list):
@@ -114,7 +120,12 @@ async def chat_direct(
                         detail="Guest messages are limited to 1,000 characters. Please log in for unlimited messages."
                     )
     else:
-        await get_current_user(request, auth, db)
+        current_user = await get_current_user(request, auth, db)
+        if req.chat_id:
+            stmt = select(Chat).where(Chat.id == req.chat_id, Chat.user_id == current_user.id)
+            res_chk = await db.execute(stmt)
+            if not res_chk.scalars().first():
+                raise HTTPException(status_code=404, detail="चैट नहीं मिली।")
 
     if not req.messages:
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
@@ -136,6 +147,11 @@ async def chat_stream_endpoint(
         client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
         check_guest_rate_limit(client_ip)
 
+        if req.chat_id:
+            res_chk = await db.execute(select(Chat).where(Chat.id == req.chat_id))
+            if res_chk.scalars().first():
+                raise HTTPException(status_code=404, detail="चैट नहीं मिली।")
+
         for m in req.messages:
             if m.role == "user":
                 if isinstance(m.content, list):
@@ -149,7 +165,12 @@ async def chat_stream_endpoint(
                         detail="Guest messages are limited to 1,000 characters. Please log in for unlimited messages."
                     )
     else:
-        await get_current_user(request, auth, db)
+        current_user = await get_current_user(request, auth, db)
+        if req.chat_id:
+            stmt = select(Chat).where(Chat.id == req.chat_id, Chat.user_id == current_user.id)
+            res_chk = await db.execute(stmt)
+            if not res_chk.scalars().first():
+                raise HTTPException(status_code=404, detail="चैट नहीं मिली।")
 
     if not req.messages:
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")

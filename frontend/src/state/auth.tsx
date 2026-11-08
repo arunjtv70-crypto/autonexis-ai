@@ -79,6 +79,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return localStorage.getItem("autonexis_is_guest") === "true";
   });
 
+  // Helper to notify other tabs/components about auth state changes
+  const broadcastAuthEvent = (type: "LOGOUT" | "AUTH_CHANGED", uid?: string | null) => {
+    try {
+      if (typeof BroadcastChannel !== "undefined") {
+        const bc = new BroadcastChannel("autonexis_auth_sync");
+        bc.postMessage({ type, uid });
+        bc.close();
+      }
+      localStorage.setItem("autonexis_auth_sync_event", JSON.stringify({ type, uid, t: Date.now() }));
+    } catch {}
+  };
+
   // Sync Firebase User to UserResponse format
   const syncUser = async (fbUser: FirebaseUser | null) => {
     if (!fbUser) {
@@ -88,9 +100,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (localStorage.getItem("autonexis_is_guest") === "true") {
         setIsGuest(true);
         setIsAuthScreenVisible(false);
+        broadcastAuthEvent("AUTH_CHANGED", "guest");
       } else {
         setIsGuest(false);
         setIsAuthScreenVisible(true);
+        broadcastAuthEvent("LOGOUT", null);
       }
       return;
     }
@@ -116,11 +130,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsGuest(false);
       localStorage.removeItem("autonexis_is_guest");
       setIsAuthScreenVisible(false);
+      broadcastAuthEvent("AUTH_CHANGED", fbUser.uid);
     } catch (err) {
       console.error("[AUTONEXIS] Failed to extract token:", err);
       setUser(null);
       setToken(null);
       setIsAuthScreenVisible(true);
+      broadcastAuthEvent("LOGOUT", null);
     }
   };
 
@@ -128,12 +144,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsGuest(true);
     localStorage.setItem("autonexis_is_guest", "true");
     setIsAuthScreenVisible(false);
+    broadcastAuthEvent("AUTH_CHANGED", "guest");
   };
 
   const exitGuestMode = () => {
     setIsGuest(false);
     localStorage.removeItem("autonexis_is_guest");
     setIsAuthScreenVisible(true);
+    broadcastAuthEvent("LOGOUT", null);
   };
 
   // 1. Listen to real Firebase Auth State
@@ -289,6 +307,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // 6. Sign Out
   const logout = async () => {
     setIsLoading(true);
+
+    // Notify other tabs immediately
+    broadcastAuthEvent("LOGOUT", null);
+
+    // Notify Service Worker to purge user cache entries
+    try {
+      if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: "PURGE_USER_CACHE" });
+      }
+    } catch {}
+
+    // Delete Cache Storage entries
+    try {
+      if ("caches" in window) {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => caches.delete(key));
+        }).catch(() => {});
+      }
+    } catch {}
+
     try {
       await signOut(auth);
     } catch (err) {

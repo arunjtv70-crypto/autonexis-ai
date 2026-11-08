@@ -7,7 +7,8 @@ from typing import AsyncGenerator, List, Dict, Any, Optional, Union
 import httpx
 from config import settings
 from math_engine import EXACT_MATH_TOOL_DEFINITION, execute_exact_math, is_math_request
-from prompts import MATH_PROMPT
+from prompts import MATH_PROMPT, ABUSE_AND_SAFETY_PROMPT
+from profanity_blocklist import contains_profanity, get_polite_fallback
 
 logger = logging.getLogger("autonexis.llm")
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,13 @@ def extract_text_from_content(content: Union[str, List[Dict[str, Any]]]) -> str:
             if isinstance(part, dict) and part.get("type") == "text":
                 texts.append(part.get("text", ""))
         return " ".join(texts)
+    return ""
+
+def get_last_user_text(messages: List[Dict[str, Any]]) -> str:
+    """Gets text from the latest user message in the thread."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return extract_text_from_content(msg.get("content", ""))
     return ""
 
 def detect_language_directive(user_text: str) -> str:
@@ -112,9 +120,13 @@ class LLMClient:
     ) -> List[Dict[str, Any]]:
         """
         Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory,
-        math rigor prompt (if math detected), and language matching directive.
+        abuse & safety rules, math rigor prompt (if math detected), and language matching directive.
         """
         extra_system_context = []
+
+        # Always include abuse & safety policy
+        extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
+
         if user_memory and user_memory.strip():
             extra_system_context.append(
                 f"[CONTINUOUS PERSISTENT CROSS-CHAT MEMORY]:\n{user_memory.strip()}\n\n"
@@ -162,6 +174,52 @@ class LLMClient:
 
         return [{"role": "system", "content": full_system}] + user_and_assistant
 
+    async def _sanitize_response(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        active_model: str,
+        conversation: List[Dict[str, Any]],
+        candidate_text: str,
+        last_user_text: str,
+        max_tokens: int
+    ) -> str:
+        """
+        Backend profanity safeguard:
+        If candidate text contains words from the blocklist, retries once with a hidden polite instruction.
+        If still profane, replaces with a calm, polite fallback line.
+        """
+        clean_candidate = re.sub(r"<think>[\s\S]*?</think>", "", candidate_text).strip()
+        if not contains_profanity(clean_candidate):
+            return clean_candidate
+
+        logger.warning("[AUTONEXIS SAFEGUARD] Profanity detected in model output, triggering polite retry.")
+        retry_conversation = list(conversation) + [
+            {"role": "assistant", "content": clean_candidate},
+            {"role": "system", "content": "CRITICAL INSTRUCTION: Reply politely with absolutely no profanity, vulgarity, or swear words."}
+        ]
+        try:
+            retry_payload = {
+                "model": active_model,
+                "messages": retry_conversation,
+                "stream": False,
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            }
+            res = await client.post(endpoint, json=retry_payload, headers=headers)
+            if res.status_code == 200:
+                retry_data = res.json()
+                retry_raw = retry_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                clean_retry = re.sub(r"<think>[\s\S]*?</think>", "", retry_raw).strip()
+                if not contains_profanity(clean_retry) and clean_retry:
+                    return clean_retry
+        except Exception as retry_err:
+            logger.error(f"[AUTONEXIS SAFEGUARD RETRY ERROR] {retry_err}")
+
+        # Fall back to polite line if still failing
+        return get_polite_fallback(last_user_text)
+
     async def chat_stream(
         self,
         messages: List[Dict[str, Any]],
@@ -171,6 +229,7 @@ class LLMClient:
         """
         Streams completion tokens as Server-Sent Events (SSE) data chunks.
         For mathematical inquiries, resolves exact_math tools with high precision before streaming.
+        Applies backend profanity safeguard to guarantee no profanity ever reaches the user.
         """
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
@@ -181,6 +240,7 @@ class LLMClient:
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
         fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
+        last_user_text = get_last_user_text(messages)
 
         # -------------------------------------------------------------------
         # MATH ROUTE: Multi-turn exact calculation tool loop (up to 10 turns)
@@ -240,13 +300,16 @@ class LLMClient:
                                 "content": str(result_str)
                             })
 
-                    # Suppress any internal reasoning / <think> tags from final text
-                    final_content = re.sub(r"<think>[\s\S]*?</think>", "", final_content).strip()
+                    # Sanitize final content through backend profanity safeguard
+                    clean_content = await self._sanitize_response(
+                        client, endpoint, headers, active_model,
+                        conversation, final_content, last_user_text, max_tokens
+                    )
 
                     # Stream text in smooth chunks to client
                     chunk_size = 12
-                    for i in range(0, len(final_content), chunk_size):
-                        sub_str = final_content[i:i + chunk_size]
+                    for i in range(0, len(clean_content), chunk_size):
+                        sub_str = clean_content[i:i + chunk_size]
                         yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
                         await asyncio.sleep(0.015)
 
@@ -260,13 +323,14 @@ class LLMClient:
                 return
 
         # -------------------------------------------------------------------
-        # GENERAL CHAT ROUTE: Standard real-time SSE token streaming
+        # GENERAL CHAT ROUTE: Safe validated token streaming
         # -------------------------------------------------------------------
         max_tokens = 512 if is_guest else 2048
+        conversation = self._prepare_messages(messages, user_memory, is_math=False)
         payload = {
             "model": active_model,
-            "messages": self._prepare_messages(messages, user_memory, is_math=False),
-            "stream": True,
+            "messages": conversation,
+            "stream": False,
             "temperature": 0.6,
             "max_tokens": max_tokens,
         }
@@ -274,33 +338,31 @@ class LLMClient:
         try:
             timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
-                        error_body = await response.aread()
-                        logger.error(f"[AUTONEXIS LLM ERROR] Status {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
-                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
+                res = await client.post(endpoint, json=payload, headers=headers)
+                if res.status_code != 200:
+                    error_body = res.text
+                    logger.error(f"[AUTONEXIS LLM ERROR] Status {res.status_code}: {error_body}")
+                    yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
 
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                yield "data: [DONE]\n\n"
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                choices = chunk.get("choices", [])
-                                if choices and "delta" in choices[0]:
-                                    delta_content = choices[0]["delta"].get("content")
-                                    # Never stream reasoning tokens or delta_content containing internal think tags
-                                    if delta_content is not None and not delta_content.startswith("<think>"):
-                                        payload_out = json.dumps({"content": delta_content}, ensure_ascii=False)
-                                        yield f"data: {payload_out}\n\n"
-                            except json.JSONDecodeError:
-                                continue
+                res_json = res.json()
+                raw_reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                # Sanitize response through backend profanity safeguard
+                clean_reply = await self._sanitize_response(
+                    client, endpoint, headers, active_model,
+                    conversation, raw_reply, last_user_text, max_tokens
+                )
+
+                # Stream clean tokens in smooth intervals
+                chunk_size = 12
+                for i in range(0, len(clean_reply), chunk_size):
+                    sub_str = clean_reply[i:i + chunk_size]
+                    yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.015)
+
+                yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {e}")
             yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
@@ -313,7 +375,7 @@ class LLMClient:
         is_guest: bool = False
     ) -> Dict[str, str]:
         """
-        Non-streaming completion fallback.
+        Non-streaming completion fallback with profanity safeguard.
         """
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
@@ -324,6 +386,7 @@ class LLMClient:
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
         fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
+        last_user_text = get_last_user_text(messages)
 
         if is_math:
             max_tokens = 512 if is_guest else 3000
@@ -353,7 +416,10 @@ class LLMClient:
                         tool_calls = msg.get("tool_calls")
                         if not tool_calls:
                             raw_reply = msg.get("content") or ""
-                            clean_reply = re.sub(r"<think>[\s\S]*?</think>", "", raw_reply).strip()
+                            clean_reply = await self._sanitize_response(
+                                client, endpoint, headers, active_model,
+                                conversation, raw_reply, last_user_text, max_tokens
+                            )
                             return {"reply": clean_reply}
 
                         conversation.append(msg)
@@ -382,9 +448,10 @@ class LLMClient:
                 return {"reply": fallback_error_msg}
 
         max_tokens = 512 if is_guest else 2048
+        conversation = self._prepare_messages(messages, user_memory, is_math=False)
         payload = {
             "model": active_model,
-            "messages": self._prepare_messages(messages, user_memory, is_math=False),
+            "messages": conversation,
             "stream": False,
             "temperature": 0.6,
             "max_tokens": max_tokens,
@@ -399,7 +466,10 @@ class LLMClient:
                     return {"reply": fallback_error_msg}
                 data = res.json()
                 reply = data["choices"][0]["message"]["content"]
-                clean_reply = re.sub(r"<think>[\s\S]*?</think>", "", reply).strip()
+                clean_reply = await self._sanitize_response(
+                    client, endpoint, headers, active_model,
+                    conversation, reply, last_user_text, max_tokens
+                )
                 return {"reply": clean_reply}
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM EXCEPTION] {e}")
