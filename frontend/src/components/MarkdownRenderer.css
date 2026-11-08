@@ -112,20 +112,20 @@
 
 /* Inline Code */
 .markdown-body :not(pre) > code {
-  background: rgba(255, 255, 255, 0.09);
+  background: rgba(125, 125, 125, 0.15);
   padding: 2px 6px;
   border-radius: 4px;
-  font-family: "JetBrains Mono", "Fira Code", "Roboto Mono", Consolas, Monaco, monospace;
+  font-family: var(--font-mono, "JetBrains Mono", Consolas, monospace);
   font-size: 0.86em;
-  color: #f1f5f9;
+  color: inherit;
 }
 
 /* Fenced Code Block Container */
 .code-block-container {
   margin: 0.75rem 0;
-  border-radius: 8px;
-  background: #101217;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-raised, #101217);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
   overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
@@ -135,14 +135,14 @@
   justify-content: space-between;
   align-items: center;
   padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(125, 125, 125, 0.06);
+  border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
 }
 
 .code-block-lang {
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-family: var(--font-mono, monospace);
   font-size: 0.72rem;
-  color: #94a3b8;
+  color: var(--text-muted, #94a3b8);
   letter-spacing: 0.5px;
   text-transform: lowercase;
 }
@@ -150,7 +150,7 @@
 .code-copy-btn {
   background: transparent;
   border: none;
-  color: #94a3b8;
+  color: var(--text-muted, #94a3b8);
   font-size: 0.75rem;
   cursor: pointer;
   display: inline-flex;
@@ -162,8 +162,8 @@
 }
 
 .code-copy-btn:hover {
-  color: #f8fafc;
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #f8fafc);
+  background: rgba(125, 125, 125, 0.12);
 }
 
 .code-block-pre {
@@ -171,10 +171,10 @@
   padding: 12px 14px;
   white-space: pre;
   overflow-x: auto;
-  font-family: "JetBrains Mono", "Fira Code", "Roboto Mono", Consolas, Monaco, monospace;
+  font-family: var(--font-mono, monospace);
   font-size: 0.85rem;
   line-height: 1.5;
-  color: #f1f5f9;
+  color: inherit;
   background: transparent;
 }
 
@@ -185,6 +185,100 @@
   font-family: inherit;
   font-size: inherit;
   color: inherit;
+}
+
+/* ---------------------------------------------------------------------------
+   KaTeX Math Rendering Styles
+   --------------------------------------------------------------------------- */
+
+/* KaTeX Theme & Typography Integration */
+.katex {
+  font-size: 1.05em;
+  color: inherit;
+  line-height: 1.2;
+}
+
+.katex-html {
+  color: inherit;
+}
+
+/* Block Math Equation Box */
+.math-block-container {
+  margin: 0.85rem 0;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-raised, #101217);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
+}
+
+.math-block-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 12px;
+  background: rgba(125, 125, 125, 0.06);
+  border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.math-block-tag {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.7rem;
+  color: var(--text-muted, #94a3b8);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.math-copy-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.73rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.math-copy-btn:hover {
+  color: var(--text-primary, #f8fafc);
+  background: rgba(125, 125, 125, 0.12);
+}
+
+.math-block-content {
+  padding: 12px 14px;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+}
+
+.katex-scroll-container {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  padding: 4px 6px;
+  display: block;
+  text-align: center;
+  -webkit-overflow-scrolling: touch;
+}
+
+.katex-scroll-container .katex-display {
+  margin: 0 !important;
+  text-align: center;
+}
+
+/* Fallback for invalid LaTeX syntax (no harsh red error text) */
+.math-fallback {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+  color: var(--text-secondary, #94a3b8);
+  background: rgba(125, 125, 125, 0.08);
+  padding: 3px 8px;
+  border-radius: 4px;
+  display: inline-block;
 }
 
 .plain-fallback {

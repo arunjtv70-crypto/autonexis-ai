@@ -884,7 +884,7 @@ export const ChatScreen: React.FC = () => {
 
                         {isUser && msg.content && (
                           <div className="message-text-content">
-                            {msg.content}
+                            <MarkdownRenderer content={msg.content} />
                           </div>
                         )}
 
