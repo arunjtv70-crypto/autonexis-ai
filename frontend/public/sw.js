@@ -1,5 +1,5 @@
-// AUTONEXIS Service Worker - Cache Busting Version: autonexis-v20261108-assistant
-const CACHE_NAME = 'autonexis-v20261108-assistant';
+// AUTONEXIS Service Worker - Cache Busting Version: autonexis-v20261109-7a2e7
+const CACHE_NAME = 'autonexis-v20261109-7a2e7';
 
 self.addEventListener('install', () => {
   self.skipWaiting();

@@ -20,10 +20,11 @@ def verify_firebase_id_token(token: str) -> Dict[str, Any]:
     Requires no service account file or firebase-admin package.
     """
     try:
+        project_id = getattr(settings, "firebase_project_id", "autonexis-ai-assistant-7a2e7") or "autonexis-ai-assistant-7a2e7"
         decoded = google.oauth2.id_token.verify_firebase_token(
             token,
             http_request,
-            audience="autonexis-ai-assistant"
+            audience=project_id
         )
         if not decoded or not (decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")):
             raise ValueError("Token missing uid claim.")
