@@ -13,8 +13,8 @@ interface MarkdownRendererProps {
 // Math Preprocessing & Postprocessing Helpers
 // ---------------------------------------------------------------------------
 
-function preprocessMath(raw: string): { processed: string; currencyMap: string[] } {
-  if (!raw) return { processed: "", currencyMap: [] };
+function preprocessMath(raw: string): { processed: string; currencyMap: string[]; hasIncompleteMath: boolean } {
+  if (!raw) return { processed: "", currencyMap: [], hasIncompleteMath: false };
 
   // 1. Protect escaped dollars: \$ -> temporary token
   let text = raw.replace(/\\\$/g, "@@ESCAPED_DOLLAR@@");
@@ -33,13 +33,21 @@ function preprocessMath(raw: string): { processed: string; currencyMap: string[]
 
   // 4. Streaming safeguard: If the content ends with an unclosed $$ (odd number of $$)
   // temporarily strip the unclosed trailing block so incomplete raw LaTeX doesn't flash
+  let hasIncompleteMath = false;
   const doubleDollarCount = (text.match(/\$\$/g) || []).length;
   if (doubleDollarCount % 2 !== 0) {
     const lastIdx = text.lastIndexOf("$$");
     text = text.slice(0, lastIdx);
+    hasIncompleteMath = true;
   }
 
-  return { processed: text, currencyMap };
+  // 5. Streaming safeguard: If text contains an unclosed code block, safely close it for parsing
+  const codeFenceCount = (text.match(/```/g) || []).length;
+  if (codeFenceCount % 2 !== 0) {
+    text = text + "\n```";
+  }
+
+  return { processed: text, currencyMap, hasIncompleteMath };
 }
 
 function restorePlaceholders(html: string, currencyMap: string[]): string {
@@ -217,6 +225,69 @@ const CodeBlock: React.FC<{ code: string; lang?: string }> = ({ code, lang }) =>
 };
 
 // ---------------------------------------------------------------------------
+// Memoized Block Component for 60FPS Streaming Performance
+// ---------------------------------------------------------------------------
+
+interface BlockProps {
+  token: any;
+  index: number;
+  currencyMap: string[];
+}
+
+const MemoizedBlock = React.memo<BlockProps>(
+  ({ token, index, currencyMap }) => {
+    if (token.type === "code") {
+      return (
+        <CodeBlock
+          key={`code-${index}`}
+          code={token.text}
+          lang={token.lang}
+        />
+      );
+    }
+
+    if (token.type === "blockMath") {
+      const mathToken = token as unknown as { text: string };
+      return (
+        <BlockMathEquation
+          key={`math-${index}`}
+          latex={mathToken.text || ""}
+        />
+      );
+    }
+
+    if (token.type === "table") {
+      const rawHtml = marked.parser([token]);
+      const finalHtml = restorePlaceholders(rawHtml, currencyMap);
+      return (
+        <div key={`table-${index}`} className="table-fade-container">
+          <div
+            className="table-scroll-wrapper"
+            dangerouslySetInnerHTML={{ __html: finalHtml }}
+          />
+        </div>
+      );
+    }
+
+    // Parse other tokens (paragraphs, lists, headings, blockquotes)
+    const rawHtml = marked.parser([token]);
+    const finalHtml = restorePlaceholders(rawHtml, currencyMap);
+
+    return (
+      <div
+        key={`block-${index}`}
+        className="markdown-block"
+        dangerouslySetInnerHTML={{ __html: finalHtml }}
+      />
+    );
+  },
+  (prevProps, nextProps) => {
+    // Only re-render if raw token contents or index has changed
+    return prevProps.token.raw === nextProps.token.raw && prevProps.index === nextProps.index;
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Main MarkdownRenderer Component
 // ---------------------------------------------------------------------------
 
@@ -224,44 +295,26 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
   if (!content) return null;
 
   try {
-    const { processed, currencyMap } = preprocessMath(content);
+    const { processed, currencyMap, hasIncompleteMath } = preprocessMath(content);
     const tokens = marked.lexer(processed);
 
     return (
       <div className="markdown-body">
-        {tokens.map((token, index) => {
-          if (token.type === "code") {
-            return (
-              <CodeBlock
-                key={`code-${index}`}
-                code={token.text}
-                lang={token.lang}
-              />
-            );
-          }
+        {tokens.map((token, index) => (
+          <MemoizedBlock
+            key={`block-token-${index}`}
+            token={token}
+            index={index}
+            currencyMap={currencyMap}
+          />
+        ))}
 
-          if (token.type === "blockMath") {
-            const mathToken = token as unknown as { text: string };
-            return (
-              <BlockMathEquation
-                key={`math-${index}`}
-                latex={mathToken.text || ""}
-              />
-            );
-          }
-
-          // Parse other tokens (paragraphs, lists, headings, tables, blockquotes)
-          const rawHtml = marked.parser([token]);
-          const finalHtml = restorePlaceholders(rawHtml, currencyMap);
-
-          return (
-            <div
-              key={`block-${index}`}
-              className="markdown-block"
-              dangerouslySetInnerHTML={{ __html: finalHtml }}
-            />
-          );
-        })}
+        {/* Calm placeholder for still-streaming incomplete equation */}
+        {hasIncompleteMath && (
+          <div className="math-loading-placeholder">
+            Computing mathematical formula...
+          </div>
+        )}
       </div>
     );
   } catch {

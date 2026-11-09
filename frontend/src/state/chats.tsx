@@ -14,15 +14,22 @@ export interface MessageItem {
   created_at?: string;
   mediaType?: "text" | "image" | "video" | "voice";
   mediaUrl?: string;
+  mediaUrls?: string[];
   mediaPrompt?: string;
   videoDuration?: string;
+}
+
+export interface AttachmentImageItem {
+  dataUrl: string;
+  fileName: string;
 }
 
 export interface AttachmentPayload {
   type: "image" | "file";
   dataUrl?: string;
+  fileName?: string;
+  images?: AttachmentImageItem[];
   textContent?: string;
-  fileName: string;
 }
 
 export interface ChatItem {
@@ -565,18 +572,29 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // Immediately extract memory from user message
     const { extractedName, newFact } = extractUserMemory(trimmed);
 
+    const attachedImages = attachment?.type === "image"
+      ? (attachment.images && attachment.images.length > 0
+          ? attachment.images
+          : attachment.dataUrl ? [{ dataUrl: attachment.dataUrl, fileName: attachment.fileName || "image.jpg" }] : [])
+      : [];
+
+    const fileLabel = attachedImages.length > 0
+      ? `[Attached ${attachedImages.length} image${attachedImages.length > 1 ? "s" : ""}: ${attachedImages.map((img) => img.fileName).join(", ")}]`
+      : attachment?.fileName ? `[Attached: ${attachment.fileName}]` : "";
+
     const userMsg: MessageItem = {
       id: "usr_" + Date.now(),
       role: "user",
-      content: trimmed || (attachment ? `[Attached: ${attachment.fileName}]` : ""),
-      mediaType: attachment?.type === "image" ? "image" : undefined,
-      mediaUrl: attachment?.type === "image" ? attachment.dataUrl : undefined,
+      content: trimmed || fileLabel,
+      mediaType: attachedImages.length > 0 ? "image" : undefined,
+      mediaUrl: attachedImages[0]?.dataUrl,
+      mediaUrls: attachedImages.length > 0 ? attachedImages.map((img) => img.dataUrl) : undefined,
       created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
     const currentChat = chats.find((c) => c.id === targetChatId);
     const isFirst = !currentChat || currentChat.messages.length === 0;
-    const words = (trimmed || (attachment ? attachment.fileName : "")).split(" ");
+    const words = (trimmed || fileLabel).split(" ");
     const autoTitle = isFirst ? (words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")) : currentChat.title;
 
     setChats((prev) =>
@@ -740,11 +758,13 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       content: m.content,
     }));
 
-    if (attachment?.type === "image" && attachment.dataUrl) {
+    if (attachedImages.length > 0) {
       const parts: MultimodalPart[] = [
-        { type: "text", text: trimmed || "What is in this image? Explain and describe it." },
-        { type: "image_url", image_url: { url: attachment.dataUrl } }
+        { type: "text", text: trimmed || "Please inspect and analyze the attached images." },
       ];
+      for (const img of attachedImages) {
+        parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+      }
       historyPayload.push({ role: "user", content: parts });
     } else if (attachment?.type === "file" && attachment.textContent) {
       const fullText = `[Attached: ${attachment.fileName}]\n\`\`\`\n${attachment.textContent}\n\`\`\`\n\n${trimmed}`;
@@ -754,7 +774,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     const assistantMsgId = "ast_" + Date.now();
-    let accumulatedContent = "";
 
     setChats((prev) =>
       prev.map((c) => {
@@ -784,71 +803,152 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     abortControllerRef.current = controller;
     const requestUid = currentUid;
 
+    // -----------------------------------------------------------------------
+    // Adaptive Smoothing Buffer via requestAnimationFrame
+    // Calms big bursts into smooth 60-120 cps typing without lagging behind
+    // -----------------------------------------------------------------------
+    let pendingBuffer = "";
+    let displayedBuffer = "";
+    let isStreamDone = false;
+    let animFrameId: number | null = null;
+    let lastTime = performance.now();
+
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const stopAnimation = () => {
+      if (animFrameId !== null) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+      }
+    };
+
+    const flushDisplay = (text: string) => {
+      displayedBuffer = text;
+      setChats((prev) =>
+        prev.map((c) => {
+          if (c.id === targetChatId) {
+            return {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantMsgId ? { ...m, content: text } : m
+              ),
+            };
+          }
+          return c;
+        })
+      );
+    };
+
+    const pumpAnimation = (now: number) => {
+      if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+        stopAnimation();
+        setIsSending(false);
+        return;
+      }
+
+      const deltaMs = Math.max(1, now - lastTime);
+      lastTime = now;
+
+      const remainingChars = pendingBuffer.length;
+
+      if (remainingChars === 0) {
+        if (isStreamDone) {
+          stopAnimation();
+          setIsSending(false);
+          return;
+        }
+        // Await next incoming network packet
+        animFrameId = requestAnimationFrame(pumpAnimation);
+        return;
+      }
+
+      // Adaptive speed calculation
+      let charsPerSec: number;
+      if (isStreamDone) {
+        // Network finished: flush rest quickly over ~150-250ms
+        charsPerSec = Math.max(280, remainingChars * 4);
+      } else if (remainingChars < 25) {
+        charsPerSec = 75; // Calm, human typing speed
+      } else if (remainingChars < 75) {
+        charsPerSec = 110;
+      } else if (remainingChars < 160) {
+        charsPerSec = 200;
+      } else {
+        charsPerSec = Math.min(500, remainingChars * 3); // Catch up if network sent big burst
+      }
+
+      const count = Math.max(1, Math.round((charsPerSec * deltaMs) / 1000));
+      const chunk = pendingBuffer.slice(0, count);
+      pendingBuffer = pendingBuffer.slice(count);
+
+      displayedBuffer += chunk;
+      flushDisplay(displayedBuffer);
+
+      animFrameId = requestAnimationFrame(pumpAnimation);
+    };
+
     try {
       await streamChatMessage(
         historyPayload,
         memoryPrompt,
         // onChunk
         (chunk) => {
-          // Discard late response if user switched account or logged out
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            stopAnimation();
             return;
           }
-          accumulatedContent += chunk;
-          setChats((prev) =>
-            prev.map((c) => {
-              if (c.id === targetChatId) {
-                return {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === assistantMsgId ? { ...m, content: accumulatedContent } : m
-                  ),
-                };
-              }
-              return c;
-            })
-          );
+
+          if (prefersReducedMotion) {
+            displayedBuffer += chunk;
+            flushDisplay(displayedBuffer);
+          } else {
+            pendingBuffer += chunk;
+            if (animFrameId === null) {
+              lastTime = performance.now();
+              animFrameId = requestAnimationFrame(pumpAnimation);
+            }
+          }
         },
         // onDone
         () => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            stopAnimation();
+            setIsSending(false);
             return;
           }
-          setIsSending(false);
+          isStreamDone = true;
+          if (prefersReducedMotion || pendingBuffer.length === 0) {
+            stopAnimation();
+            setIsSending(false);
+          }
         },
         // onError fallback
         async () => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+            stopAnimation();
             setIsSending(false);
             return;
           }
-          if (!accumulatedContent) {
+          if (!displayedBuffer && !pendingBuffer) {
             try {
               const reply = await postChatMessage(historyPayload, memoryPrompt, isGuest);
               if (activeUidRef.current !== requestUid || controller.signal.aborted) {
                 return;
               }
-              setChats((prev) =>
-                prev.map((c) => {
-                  if (c.id === targetChatId) {
-                    return {
-                      ...c,
-                      messages: c.messages.map((m) =>
-                        m.id === assistantMsgId ? { ...m, content: reply } : m
-                      ),
-                    };
-                  }
-                  return c;
-                })
-              );
+              flushDisplay(reply);
             } catch {}
           }
+          stopAnimation();
           setIsSending(false);
         },
         isGuest,
         controller.signal
       );
     } catch {
+      stopAnimation();
       setIsSending(false);
     }
   };

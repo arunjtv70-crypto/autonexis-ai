@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     llm_model: str = "openai/gpt-oss-120b"
     llm_vision_model: str = "qwen/qwen3.8-27b"
     llm_model_think: str = "openai/gpt-oss-120b"
+    llm_enable_think_self_check: bool = True
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
     # Firebase Authentication

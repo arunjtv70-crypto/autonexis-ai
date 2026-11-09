@@ -5,7 +5,7 @@ import { Logo } from "../components/Logo";
 import { SettingsModal } from "../components/SettingsModal";
 import { UserMenuDropdown, type SettingsTabId } from "../components/UserMenuDropdown";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
-import { isImageFile, isTextFile, resizeImageToDataUrl, readTextFile } from "../utils/fileHelpers";
+import { isImageFile, isTextFile, resizeImageToDataUrl, compressImagesBatch, readTextFile } from "../utils/fileHelpers";
 import {
   ImageCreationCard,
   VideoCreationCard,
@@ -74,13 +74,17 @@ export const ChatScreen: React.FC = () => {
   const [autoSpeak, setAutoSpeak] = useState(false);
   const recognitionRef = useRef<any>(null);
 
-  // File & Image Attachment States
+  // File & Image Attachment States (supports up to 4 images)
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [attachedImage, setAttachedImage] = useState<{ dataUrl: string; fileName: string } | null>(null);
+  const [attachedImages, setAttachedImages] = useState<Array<{ dataUrl: string; fileName: string }>>([]);
   const [attachedFile, setAttachedFile] = useState<{ textContent: string; fileName: string } | null>(null);
+  const [fileUploadError, setFileUploadError] = useState<string | null>(null);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Auto-scroll & Dynamic Viewport Tracking
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledUpRef = useRef(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Determine user display name: Firebase User account > fallback
@@ -176,9 +180,37 @@ export const ChatScreen: React.FC = () => {
     }
   }, [activeChat?.messages.length, isSending, autoSpeak]);
 
-  // Auto scroll to latest message
+  // Track scroll position to know when user intentionally scrolled up
+  const handleScroll = () => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceToBottom > 75) {
+      userScrolledUpRef.current = true;
+      setShowScrollToBottom(true);
+    } else {
+      userScrolledUpRef.current = false;
+      setShowScrollToBottom(false);
+    }
+  };
+
+  const scrollToBottom = () => {
+    userScrolledUpRef.current = false;
+    setShowScrollToBottom(false);
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  };
+
+  // Auto-scroll on incoming stream updates (instant scrollTop update, no layout fighting)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!userScrolledUpRef.current && chatScrollRef.current) {
+      requestAnimationFrame(() => {
+        if (chatScrollRef.current && !userScrolledUpRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+      });
+    }
   }, [activeChat?.messages, isSending]);
 
   // Auto grow textarea height
@@ -191,7 +223,7 @@ export const ChatScreen: React.FC = () => {
   }, [inputContent]);
 
   const handleSend = async () => {
-    if ((!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile) return;
+    if ((!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile) return;
 
     if (isGuest && guestMessagesRemaining <= 0) {
       setShowGuestLimitModal(true);
@@ -199,23 +231,29 @@ export const ChatScreen: React.FC = () => {
     }
 
     const textToSend = inputContent.trim();
-    const curImage = attachedImage;
+    const curImages = attachedImages;
     const curFile = attachedFile;
 
     setInputContent("");
-    setAttachedImage(null);
+    setAttachedImages([]);
     setAttachedFile(null);
+    setFileUploadError(null);
+
+    // Re-engage auto-follow on sending
+    userScrolledUpRef.current = false;
+    setShowScrollToBottom(false);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
 
     let attachmentPayload: AttachmentPayload | null = null;
-    if (curImage) {
+    if (curImages.length > 0) {
       attachmentPayload = {
         type: "image",
-        dataUrl: curImage.dataUrl,
-        fileName: curImage.fileName,
+        dataUrl: curImages[0].dataUrl,
+        fileName: curImages[0].fileName,
+        images: curImages,
       };
     } else if (curFile) {
       attachmentPayload = {
@@ -242,8 +280,8 @@ export const ChatScreen: React.FC = () => {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
 
     if (isGuest) {
       setShowGuestLimitModal(true);
@@ -253,21 +291,33 @@ export const ChatScreen: React.FC = () => {
 
     try {
       setIsProcessingFile(true);
-      if (isImageFile(file)) {
-        const dataUrl = await resizeImageToDataUrl(file);
-        setAttachedImage({ dataUrl, fileName: file.name });
-        setAttachedFile(null);
-      } else if (isTextFile(file)) {
-        const text = await readTextFile(file);
-        setAttachedFile({ textContent: text, fileName: file.name });
-        setAttachedImage(null);
-      } else {
-        const text = await readTextFile(file);
-        setAttachedFile({ textContent: text, fileName: file.name });
-        setAttachedImage(null);
+      setFileUploadError(null);
+      const files = Array.from(fileList);
+      const imageFiles = files.filter(isImageFile);
+      const textFiles = files.filter(isTextFile);
+
+      if (imageFiles.length > 0) {
+        const remainingSlots = Math.max(0, 4 - attachedImages.length);
+        if (remainingSlots === 0) {
+          setFileUploadError("You can attach up to 4 images per message.");
+          return;
+        }
+        const toProcess = imageFiles.slice(0, remainingSlots);
+        const result = await compressImagesBatch(toProcess);
+        if (result.error) {
+          setFileUploadError(result.error);
+        } else {
+          setAttachedImages((prev) => [...prev, ...result.images].slice(0, 4));
+          setAttachedFile(null);
+        }
+      } else if (textFiles.length > 0) {
+        const text = await readTextFile(textFiles[0]);
+        setAttachedFile({ textContent: text, fileName: textFiles[0].name });
+        setAttachedImages([]);
       }
     } catch (err) {
       console.error("[AUTONEXIS] Attachment processing error:", err);
+      setFileUploadError("Unable to process attachment. Please try again.");
     } finally {
       setIsProcessingFile(false);
       e.target.value = "";
@@ -541,17 +591,22 @@ export const ChatScreen: React.FC = () => {
           </div>
         </header>
 
-        {/* Hidden File Input for Image & Code Uploads */}
+        {/* Hidden File Input for Image & Code Uploads (supports multiple images) */}
         <input
           type="file"
           ref={fileInputRef}
           onChange={handleFileUpload}
+          multiple
           accept="image/*,.txt,.md,.csv,.json,.js,.ts,.tsx,.py,.html,.css,.sql,.sh,.yaml,.yml,.env,.log"
           style={{ display: "none" }}
         />
 
         {/* Scrollable Conversation / Home Area */}
-        <main className="chat-conversation-area">
+        <main
+          className="chat-conversation-area"
+          ref={chatScrollRef}
+          onScroll={handleScroll}
+        >
           {!activeChat || activeChat.messages.length === 0 ? (
             /* ==============================================================
                INSPIRATION-ALIGNED HOME SCREEN (AUTONEXIS AESTHETIC)
@@ -587,19 +642,34 @@ export const ChatScreen: React.FC = () => {
                   className="chat-input-textarea"
                 />
 
-                {/* Attached Image Thumbnail Preview */}
-                {attachedImage && (
-                  <div className="attachment-indicator-pill attached-image-indicator">
-                    <img src={attachedImage.dataUrl} alt="Thumbnail preview" className="input-thumb-preview" />
-                    <span className="attachment-filename">{attachedImage.fileName}</span>
-                    <button
-                      type="button"
-                      onClick={() => setAttachedImage(null)}
-                      className="attachment-remove-btn"
-                      aria-label="Remove image"
-                    >
-                      ✕
-                    </button>
+                {/* Attached Images Thumbnails Preview (up to 4 images) */}
+                {attachedImages.length > 0 && (
+                  <div className="attached-images-preview-row">
+                    {attachedImages.map((img, idx) => (
+                      <div key={idx} className="attachment-indicator-pill attached-image-indicator">
+                        <img src={img.dataUrl} alt={`Thumbnail ${idx + 1}`} className="input-thumb-preview" />
+                        <span className="attachment-filename">{img.fileName}</span>
+                        <button
+                          type="button"
+                          onClick={() => setAttachedImages((prev) => prev.filter((_, i) => i !== idx))}
+                          className="attachment-remove-btn"
+                          aria-label={`Remove image ${idx + 1}`}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                    {attachedImages.length < 4 && (
+                      <button
+                        type="button"
+                        className="add-more-images-btn"
+                        onClick={() => fileInputRef.current?.click()}
+                        title="Add another image (up to 4)"
+                      >
+                        <IconPlus size={12} />
+                        <span>Add ({attachedImages.length}/4)</span>
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -616,6 +686,13 @@ export const ChatScreen: React.FC = () => {
                     >
                       ✕
                     </button>
+                  </div>
+                )}
+
+                {fileUploadError && (
+                  <div className="attachment-error-note">
+                    <span>{fileUploadError}</span>
+                    <button type="button" onClick={() => setFileUploadError(null)}>✕</button>
                   </div>
                 )}
 
@@ -846,16 +923,20 @@ export const ChatScreen: React.FC = () => {
                       )}
 
                       <div className={`message-bubble-box ${isUser ? "user-box" : "assistant-box"}`}>
-                        {/* User uploaded image thumbnail */}
-                        {isUser && msg.mediaType === "image" && msg.mediaUrl && (
-                          <div className="user-uploaded-image-wrapper">
-                            <img
-                              src={msg.mediaUrl}
-                              alt="Uploaded attachment"
-                              className="user-uploaded-img"
-                              onClick={() => window.open(msg.mediaUrl, "_blank")}
-                              title="Click to view full size"
-                            />
+                        {/* User uploaded image thumbnails (supports up to 4 images) */}
+                        {isUser && (msg.mediaUrls?.length || msg.mediaUrl) && (
+                          <div className="user-uploaded-images-grid">
+                            {(msg.mediaUrls || [msg.mediaUrl!]).map((url, imgIdx) => (
+                              <div key={imgIdx} className="user-uploaded-image-wrapper">
+                                <img
+                                  src={url}
+                                  alt={`Uploaded attachment ${imgIdx + 1}`}
+                                  className="user-uploaded-img"
+                                  onClick={() => window.open(url, "_blank")}
+                                  title="Click to view full size"
+                                />
+                              </div>
+                            ))}
                           </div>
                         )}
 
@@ -919,29 +1000,45 @@ export const ChatScreen: React.FC = () => {
                   );
                 })}
 
-                {/* Sending / Generating indicator */}
-                {isSending && (
-                  <div className="message-row assistant-row">
-                    <div className="assistant-avatar">
-                      <img
-                        src="/logo_icon.png?v=20261107"
-                        alt="AUTONEXIS"
-                        className="assistant-avatar-img"
-                      />
-                    </div>
-                    <div className="message-bubble-box assistant-box">
-                      <div className="typing-dots">
-                        <span className="dot"></span>
-                        <span className="dot"></span>
-                        <span className="dot"></span>
+                {/* Sending / Generating indicator: ONLY show before text tokens start arriving */}
+                {isSending &&
+                  (!activeChat.messages.length ||
+                    activeChat.messages[activeChat.messages.length - 1].role !== "assistant" ||
+                    !activeChat.messages[activeChat.messages.length - 1].content) && (
+                    <div className="message-row assistant-row">
+                      <div className="assistant-avatar">
+                        <img
+                          src="/logo_icon.png?v=20261107"
+                          alt="AUTONEXIS"
+                          className="assistant-avatar-img"
+                        />
+                      </div>
+                      <div className="message-bubble-box assistant-box">
+                        <div className="typing-dots">
+                          <span className="dot"></span>
+                          <span className="dot"></span>
+                          <span className="dot"></span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
                 <div ref={messagesEndRef} />
               </div>
             </div>
+          )}
+
+          {/* Floating Scroll-to-Latest Button */}
+          {showScrollToBottom && (
+            <button
+              type="button"
+              className="scroll-to-latest-pill"
+              onClick={scrollToBottom}
+              aria-label="Scroll to latest message"
+            >
+              <IconChevronDown size={14} />
+              <span>Scroll to latest</span>
+            </button>
           )}
         </main>
 
@@ -965,19 +1062,34 @@ export const ChatScreen: React.FC = () => {
                 className="chat-input-textarea"
               />
 
-              {/* Attached Image Thumbnail Preview */}
-              {attachedImage && (
-                <div className="attachment-indicator-pill attached-image-indicator">
-                  <img src={attachedImage.dataUrl} alt="Thumbnail preview" className="input-thumb-preview" />
-                  <span className="attachment-filename">{attachedImage.fileName}</span>
-                  <button
-                    type="button"
-                    onClick={() => setAttachedImage(null)}
-                    className="attachment-remove-btn"
-                    aria-label="Remove image"
-                  >
-                    ✕
-                  </button>
+              {/* Attached Images Thumbnails Preview (up to 4 images) */}
+              {attachedImages.length > 0 && (
+                <div className="attached-images-preview-row">
+                  {attachedImages.map((img, idx) => (
+                    <div key={idx} className="attachment-indicator-pill attached-image-indicator">
+                      <img src={img.dataUrl} alt={`Thumbnail ${idx + 1}`} className="input-thumb-preview" />
+                      <span className="attachment-filename">{img.fileName}</span>
+                      <button
+                        type="button"
+                        onClick={() => setAttachedImages((prev) => prev.filter((_, i) => i !== idx))}
+                        className="attachment-remove-btn"
+                        aria-label={`Remove image ${idx + 1}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  {attachedImages.length < 4 && (
+                    <button
+                      type="button"
+                      className="add-more-images-btn"
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Add another image (up to 4)"
+                    >
+                      <IconPlus size={12} />
+                      <span>Add ({attachedImages.length}/4)</span>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -994,6 +1106,13 @@ export const ChatScreen: React.FC = () => {
                   >
                     ✕
                   </button>
+                </div>
+              )}
+
+              {fileUploadError && (
+                <div className="attachment-error-note">
+                  <span>{fileUploadError}</span>
+                  <button type="button" onClick={() => setFileUploadError(null)}>✕</button>
                 </div>
               )}
 

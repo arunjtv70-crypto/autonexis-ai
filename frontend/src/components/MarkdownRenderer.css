@@ -3,11 +3,11 @@
   font-size: 0.95rem;
   line-height: 1.6;
   color: inherit;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .markdown-block {
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.65rem;
 }
 
 .markdown-block:last-child {
@@ -15,7 +15,7 @@
 }
 
 .markdown-body p {
-  margin: 0.4rem 0;
+  margin: 0.5rem 0;
   line-height: 1.6;
 }
 
@@ -52,7 +52,7 @@
 .markdown-body ul,
 .markdown-body ol {
   padding-left: 1.4rem;
-  margin: 0.4rem 0;
+  margin: 0.45rem 0;
 }
 
 .markdown-body li {
@@ -88,26 +88,99 @@
   border-radius: 0 4px 4px 0;
 }
 
-/* Tables */
+/* ---------------------------------------------------------------------------
+   Mobile-Friendly Responsive Tables with Fade Edge & Sticky Headers
+   --------------------------------------------------------------------------- */
+.table-fade-container {
+  position: relative;
+  margin: 0.85rem 0;
+  width: 100%;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  background: var(--surface-raised, rgba(255, 255, 255, 0.02));
+  overflow: hidden;
+}
+
+.table-fade-container::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, rgba(15, 17, 23, 0.8));
+  opacity: 0.9;
+  transition: opacity 0.2s ease;
+}
+
+.table-scroll-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
+  max-width: 100%;
+  scrollbar-width: thin;
+}
+
+.table-scroll-wrapper table,
 .markdown-body table {
   border-collapse: collapse;
   width: 100%;
-  margin: 0.8rem 0;
-  font-size: 0.88rem;
-  overflow-x: auto;
-  display: block;
-}
-
-.markdown-body th,
-.markdown-body td {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 8px 12px;
+  min-width: 280px;
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.45;
   text-align: left;
 }
 
+.table-scroll-wrapper th,
+.table-scroll-wrapper td,
+.markdown-body th,
+.markdown-body td {
+  padding: 8px 12px;
+  text-align: left;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  white-space: normal !important;
+  hyphens: none !important;
+  min-width: 90px;
+}
+
+.table-scroll-wrapper th,
 .markdown-body th {
-  background: rgba(255, 255, 255, 0.05);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-elevated, #1c202a);
   font-weight: 600;
+  border-bottom: 2px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+
+.table-scroll-wrapper tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Calm placeholders for still-streaming incomplete blocks */
+.math-loading-placeholder,
+.table-loading-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 0.4rem 0;
+  border-radius: 6px;
+  background: rgba(125, 125, 125, 0.07);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.8rem;
+  font-family: var(--font-mono, monospace);
+  animation: pulse-calm 2s infinite ease-in-out;
+}
+
+@keyframes pulse-calm {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
 }
 
 /* Inline Code */

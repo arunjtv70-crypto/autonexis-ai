@@ -180,7 +180,7 @@ async def chat_stream_endpoint(
         llm_client.chat_stream(messages_payload, req.user_memory, is_guest=is_guest),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }

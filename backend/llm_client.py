@@ -7,7 +7,12 @@ from typing import AsyncGenerator, List, Dict, Any, Optional, Union
 import httpx
 from config import settings
 from math_engine import EXACT_MATH_TOOL_DEFINITION, execute_exact_math, is_math_request
-from prompts import MATH_PROMPT, ABUSE_AND_SAFETY_PROMPT
+from prompts import (
+    MATH_PROMPT,
+    ABUSE_AND_SAFETY_PROMPT,
+    TABLE_AND_LAYOUT_PROMPT,
+    IMAGE_REASONING_PROMPT,
+)
 from profanity_blocklist import contains_profanity, get_polite_fallback
 
 logger = logging.getLogger("autonexis.llm")
@@ -25,6 +30,38 @@ def has_image_content(messages: List[Dict[str, Any]]) -> bool:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     return True
     return False
+
+def prune_historical_images(messages: List[Dict[str, Any]], keep_latest: int = 2) -> List[Dict[str, Any]]:
+    """
+    Keeps full image data for only the latest N messages containing images.
+    Replaces older image attachments with '[image sent earlier]' to conserve tokens
+    and prevent request payload bloat.
+    """
+    img_indices = []
+    for idx, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+            img_indices.append(idx)
+
+    indices_to_keep = set(img_indices[-keep_latest:]) if len(img_indices) > keep_latest else set(img_indices)
+
+    pruned = []
+    for idx, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list) and idx not in indices_to_keep:
+            new_parts = []
+            had_image = False
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    had_image = True
+                else:
+                    new_parts.append(part)
+            if had_image:
+                new_parts.append({"type": "text", "text": "[image sent earlier]"})
+            pruned.append({**msg, "content": new_parts})
+        else:
+            pruned.append(msg)
+    return pruned
 
 def extract_text_from_content(content: Union[str, List[Dict[str, Any]]]) -> str:
     """Extracts plain text string from either string or multimodal list."""
@@ -127,6 +164,13 @@ class LLMClient:
         # Always include abuse & safety policy
         extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
 
+        # Always include mobile layout, headings, and table policy
+        extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
+
+        # Include image understanding & puzzle reasoning policy if images present
+        if has_image_content(messages):
+            extra_system_context.append(IMAGE_REASONING_PROMPT)
+
         if user_memory and user_memory.strip():
             extra_system_context.append(
                 f"[CONTINUOUS PERSISTENT CROSS-CHAT MEMORY]:\n{user_memory.strip()}\n\n"
@@ -142,6 +186,9 @@ class LLMClient:
         
         # Trim history if excessively long while keeping recent context
         trimmed_messages = messages[-max_history:] if len(messages) > max_history else messages
+
+        # Prune older images to conserve token limits (only keep latest 2 messages with images)
+        trimmed_messages = prune_historical_images(trimmed_messages, keep_latest=2)
 
         user_and_assistant = []
         last_user_text = ""
@@ -307,11 +354,11 @@ class LLMClient:
                     )
 
                     # Stream text in smooth chunks to client
-                    chunk_size = 12
+                    chunk_size = 8
                     for i in range(0, len(clean_content), chunk_size):
                         sub_str = clean_content[i:i + chunk_size]
                         yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.015)
+                        await asyncio.sleep(0.008)
 
                     yield "data: [DONE]\n\n"
                     return
@@ -323,46 +370,116 @@ class LLMClient:
                 return
 
         # -------------------------------------------------------------------
-        # GENERAL CHAT ROUTE: Safe validated token streaming
+        # GENERAL CHAT & VISION ROUTE: True Real-time SSE Token Streaming
         # -------------------------------------------------------------------
         max_tokens = 512 if is_guest else 2048
         conversation = self._prepare_messages(messages, user_memory, is_math=False)
+
+        # Optional Think Mode Self-Check for Images/Complex Reasoning
+        enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
+        run_self_check = enable_self_check and not is_guest and is_vision
+
+        if run_self_check:
+            # First produce response, then run verification check
+            payload = {
+                "model": active_model,
+                "messages": conversation,
+                "stream": False,
+                "temperature": 0.2,
+                "max_tokens": max_tokens,
+            }
+            try:
+                timeout = httpx.Timeout(connect=15.0, read=70.0, write=15.0, pool=15.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    res = await client.post(endpoint, json=payload, headers=headers)
+                    if res.status_code != 200:
+                        error_body = res.text
+                        logger.error(f"[AUTONEXIS LLM VISION ERROR] Status {res.status_code}: {error_body}")
+                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    raw_ans = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                    
+                    # Run quick self-check verification
+                    check_convo = list(conversation) + [
+                        {"role": "assistant", "content": raw_ans},
+                        {"role": "user", "content": "Carefully double-check your answer above. Check for any arithmetic mistakes, missed constraints, or visual inaccuracies. If you find any error, provide the corrected answer. If it is 100% correct, reply 'VERIFIED_CORRECT'."}
+                    ]
+                    check_payload = {
+                        "model": active_model,
+                        "messages": check_convo,
+                        "stream": False,
+                        "temperature": 0.1,
+                        "max_tokens": max_tokens,
+                    }
+                    final_ans = raw_ans
+                    try:
+                        check_res = await client.post(endpoint, json=check_payload, headers=headers)
+                        if check_res.status_code == 200:
+                            check_text = check_res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                            if check_text and "VERIFIED_CORRECT" not in check_text and len(check_text) > 20:
+                                final_ans = check_text
+                    except Exception as chk_err:
+                        logger.warning(f"[AUTONEXIS SELF-CHECK WARNING] {chk_err}")
+
+                    clean_ans = await self._sanitize_response(
+                        client, endpoint, headers, active_model,
+                        conversation, final_ans, last_user_text, max_tokens
+                    )
+
+                    chunk_size = 8
+                    for i in range(0, len(clean_ans), chunk_size):
+                        sub_str = clean_ans[i:i + chunk_size]
+                        yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0.008)
+
+                    yield "data: [DONE]\n\n"
+                    return
+            except Exception as ex:
+                logger.error(f"[AUTONEXIS LLM EXCEPTION] {ex}")
+                yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+        # Pure Real-time Streaming with stream=True towards model provider
         payload = {
             "model": active_model,
             "messages": conversation,
-            "stream": False,
+            "stream": True,
             "temperature": 0.6,
             "max_tokens": max_tokens,
         }
 
         try:
-            timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
+            timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                res = await client.post(endpoint, json=payload, headers=headers)
-                if res.status_code != 200:
-                    error_body = res.text
-                    logger.error(f"[AUTONEXIS LLM ERROR] Status {res.status_code}: {error_body}")
-                    yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                    if response.status_code != 200:
+                        error_body = await response.aread()
+                        logger.error(f"[AUTONEXIS LLM STREAM ERROR] Status {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
+                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    async for line in response.aiter_lines():
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        if line_str == "data: [DONE]":
+                            break
+                        if line_str.startswith("data: "):
+                            raw_chunk = line_str[6:].strip()
+                            try:
+                                chunk_json = json.loads(raw_chunk)
+                                delta = chunk_json.get("choices", [{}])[0].get("delta", {})
+                                token_piece = delta.get("content", "")
+                                if token_piece:
+                                    yield f"data: {json.dumps({'content': token_piece}, ensure_ascii=False)}\n\n"
+                            except Exception:
+                                pass
+
                     yield "data: [DONE]\n\n"
-                    return
-
-                res_json = res.json()
-                raw_reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-                # Sanitize response through backend profanity safeguard
-                clean_reply = await self._sanitize_response(
-                    client, endpoint, headers, active_model,
-                    conversation, raw_reply, last_user_text, max_tokens
-                )
-
-                # Stream clean tokens in smooth intervals
-                chunk_size = 12
-                for i in range(0, len(clean_reply), chunk_size):
-                    sub_str = clean_reply[i:i + chunk_size]
-                    yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(0.015)
-
-                yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {e}")
             yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"

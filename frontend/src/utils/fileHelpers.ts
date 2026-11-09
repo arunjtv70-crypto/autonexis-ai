@@ -36,13 +36,13 @@ export function isTextFile(file: File): boolean {
 }
 
 /**
- * Resizes an image file to max 1280px on its longest edge and compresses to JPEG ~0.8 quality.
+ * Resizes an image file to max 1600px on its longest edge and compresses to JPEG ~0.85 quality.
  * Returns a base64 Data URL (data:image/jpeg;base64,...).
  */
 export async function resizeImageToDataUrl(
   file: File,
-  maxDimension = 1280,
-  quality = 0.8
+  maxDimension = 1600,
+  quality = 0.85
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -86,6 +86,80 @@ export async function resizeImageToDataUrl(
     };
     reader.readAsDataURL(file);
   });
+}
+
+export interface CompressedImageResult {
+  dataUrl: string;
+  fileName: string;
+  sizeBytes: number;
+}
+
+export interface BatchCompressionResult {
+  images: CompressedImageResult[];
+  totalBytes: number;
+  error?: string;
+}
+
+/**
+ * Optimizes a batch of up to 4 images to ensure total payload size
+ * remains comfortably below Vercel's 4.5 MB request limit.
+ * Dynamically steps down quality if the collective size is large.
+ */
+export async function compressImagesBatch(
+  files: File[],
+  maxFiles = 4
+): Promise<BatchCompressionResult> {
+  const selectedFiles = files.slice(0, maxFiles);
+  let quality = 0.85;
+  let maxDim = 1600;
+
+  // Helper to compress all files at given params
+  const tryCompress = async (dim: number, qual: number) => {
+    const results: CompressedImageResult[] = [];
+    let total = 0;
+    for (const f of selectedFiles) {
+      const dataUrl = await resizeImageToDataUrl(f, dim, qual);
+      const sizeBytes = Math.round((dataUrl.length * 3) / 4);
+      total += sizeBytes;
+      results.push({ dataUrl, fileName: f.name, sizeBytes });
+    }
+    return { results, total };
+  };
+
+  // Target: Under 3.2 MB total (well below 4.5 MB Vercel limit)
+  const MAX_ALLOWED_BYTES = 3.2 * 1024 * 1024;
+
+  let attempt = await tryCompress(maxDim, quality);
+
+  if (attempt.total > MAX_ALLOWED_BYTES) {
+    quality = 0.75;
+    attempt = await tryCompress(maxDim, quality);
+  }
+
+  if (attempt.total > MAX_ALLOWED_BYTES) {
+    quality = 0.65;
+    maxDim = 1280;
+    attempt = await tryCompress(maxDim, quality);
+  }
+
+  if (attempt.total > MAX_ALLOWED_BYTES) {
+    quality = 0.55;
+    maxDim = 1024;
+    attempt = await tryCompress(maxDim, quality);
+  }
+
+  if (attempt.total > 3.6 * 1024 * 1024) {
+    return {
+      images: attempt.results,
+      totalBytes: attempt.total,
+      error: "The selected images are too large to send together. Please choose fewer or smaller images.",
+    };
+  }
+
+  return {
+    images: attempt.results,
+    totalBytes: attempt.total,
+  };
 }
 
 /**
