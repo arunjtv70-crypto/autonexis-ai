@@ -5,7 +5,7 @@ import { Logo } from "../components/Logo";
 import { SettingsModal } from "../components/SettingsModal";
 import { UserMenuDropdown, type SettingsTabId } from "../components/UserMenuDropdown";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
-import { isImageFile, isTextFile, resizeImageToDataUrl, compressImagesBatch, readTextFile } from "../utils/fileHelpers";
+import { isImageFile, isTextFile, compressImagesBatch, readTextFile } from "../utils/fileHelpers";
 import {
   ImageCreationCard,
   VideoCreationCard,
@@ -812,7 +812,7 @@ export const ChatScreen: React.FC = () => {
                     <button
                       type="button"
                       className="chat-send-btn"
-                      disabled={(!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile}
+                      disabled={(!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile}
                       onClick={handleSend}
                       aria-label="Send message"
                       title="Send message (Enter)"
@@ -1022,8 +1022,6 @@ export const ChatScreen: React.FC = () => {
                       </div>
                     </div>
                   )}
-
-                <div ref={messagesEndRef} />
               </div>
             </div>
           )}
@@ -1232,7 +1230,7 @@ export const ChatScreen: React.FC = () => {
                   <button
                     type="button"
                     className="chat-send-btn"
-                    disabled={(!inputContent.trim() && !attachedImage && !attachedFile) || isSending || isProcessingFile}
+                    disabled={(!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile}
                     onClick={handleSend}
                     aria-label="Send message"
                     title="Send (Enter)"

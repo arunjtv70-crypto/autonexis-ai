@@ -1,5 +1,5 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider } from "firebase/auth";
+import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
+import { getAuth, GoogleAuthProvider, type Auth } from "firebase/auth";
 
 // Public Firebase Web Client Configuration (safe for frontend)
 const firebaseConfig = {
@@ -11,8 +11,8 @@ const firebaseConfig = {
   appId: "1:899165689083:web:8feee8d2ea513d8437cc5e",
 };
 
-// On app start, if the stored Firebase auth data belongs to a different project id,
-// clear it so no stale session survives.
+// On app start, if stored Firebase auth belongs to a different project id,
+// clean it so no stale cross-project session survives.
 const ACTIVE_PROJECT_ID = "autonexis-ai-assistant-7a2e7";
 if (typeof window !== "undefined") {
   try {
@@ -33,9 +33,38 @@ if (typeof window !== "undefined") {
   }
 }
 
-// Initialize Firebase singleton
-export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+// Resilient Firebase initialization with fallback
+let appInstance: FirebaseApp;
+let authInstance: Auth;
+let googleProviderInstance: GoogleAuthProvider;
 
-export const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: "select_account" });
+try {
+  appInstance = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+  authInstance = getAuth(appInstance);
+  googleProviderInstance = new GoogleAuthProvider();
+  googleProviderInstance.setCustomParameters({ prompt: "select_account" });
+} catch (error) {
+  console.warn("[AUTONEXIS] Firebase failed to initialize gracefully:", error);
+  // Safe dummy fallback so module evaluation and React rendering never fail
+  appInstance = {
+    name: "[DEFAULT]",
+    options: firebaseConfig,
+    automaticDataCollectionEnabled: false,
+  } as FirebaseApp;
+
+  authInstance = {
+    app: appInstance,
+    name: "auth",
+    config: {},
+    currentUser: null,
+    onAuthStateChanged: (_cb: any) => () => {},
+    onIdTokenChanged: (_cb: any) => () => {},
+    signOut: async () => {},
+  } as unknown as Auth;
+
+  googleProviderInstance = new GoogleAuthProvider();
+}
+
+export const app = appInstance;
+export const auth = authInstance;
+export const googleProvider = googleProviderInstance;

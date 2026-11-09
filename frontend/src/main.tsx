@@ -4,25 +4,59 @@ import "./styles/base.css";
 import { ThemeProvider } from "./state/theme";
 import { AuthProvider } from "./state/auth";
 import { ChatsProvider } from "./state/chats";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import App from "./App";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <ThemeProvider>
-      <AuthProvider>
-        <ChatsProvider>
-          <App />
-        </ChatsProvider>
-      </AuthProvider>
-    </ThemeProvider>
-  </StrictMode>
-);
+// Guard against ChunkLoadError / stale asset hashes after deployments
+function handleChunkError(errorLike: any) {
+  const msg = String(errorLike?.message || errorLike?.reason?.message || errorLike || "");
+  const isChunkError =
+    msg.includes("Loading chunk") ||
+    msg.includes("Failed to fetch dynamically imported module") ||
+    msg.includes("Importing a module script failed") ||
+    msg.includes("error loading dynamically imported module");
 
-// Clean up any existing Service Worker to prevent stale caching issues
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.getRegistrations().then((registrations) => {
-    for (const registration of registrations) {
-      registration.unregister();
+  if (isChunkError) {
+    const RELOAD_KEY = "autonexis_chunk_reload_lock";
+    const alreadyReloaded = sessionStorage.getItem(RELOAD_KEY);
+    if (!alreadyReloaded) {
+      sessionStorage.setItem(RELOAD_KEY, "true");
+      // Clear cache and hard reload once
+      if (typeof caches !== "undefined") {
+        caches
+          .keys()
+          .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+          .finally(() => {
+            window.location.reload();
+          });
+      } else {
+        window.location.reload();
+      }
     }
-  });
+  }
+}
+
+window.addEventListener("error", (event) => handleChunkError(event.error || event.message));
+window.addEventListener("unhandledrejection", (event) => handleChunkError(event.reason));
+
+const rootElement = document.getElementById("root");
+if (rootElement) {
+  const root = createRoot(rootElement);
+  root.render(
+    <StrictMode>
+      <ErrorBoundary>
+        <ThemeProvider>
+          <AuthProvider>
+            <ChatsProvider>
+              <App />
+            </ChatsProvider>
+          </AuthProvider>
+        </ThemeProvider>
+      </ErrorBoundary>
+    </StrictMode>
+  );
+
+  try {
+    (window as any).__AUTONEXIS_MOUNTED__ = true;
+  } catch {}
 }

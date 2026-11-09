@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0C0C0E" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#F8F8FA" media="(prefers-color-scheme: light)" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>AUTONEXIS Assistant</title>
@@ -53,6 +54,57 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function() {
+        var timer = setTimeout(function() {
+          var root = document.getElementById('root');
+          if (root && root.children.length === 0 && !window.__AUTONEXIS_MOUNTED__) {
+            root.innerHTML = '' +
+              '<div style="min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background-color:var(--bg-app,#0C0C0E);color:var(--text-primary,#ffffff);font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;">' +
+                '<div style="max-width:420px;width:100%;background-color:var(--bg-card,#141416);border:1px solid var(--border-subtle,rgba(255,255,255,0.08));border-radius:16px;padding:36px 28px;text-align:center;box-shadow:0 20px 40px rgba(0,0,0,0.4);">' +
+                  '<div style="width:56px;height:56px;margin:0 auto 20px;border-radius:50%;overflow:hidden;border:1px solid var(--border-subtle,rgba(255,255,255,0.12));display:flex;align-items:center;justify-content:center;">' +
+                    '<img src="/logo_circle.png?v=20261107" alt="AUTONEXIS" style="width:100%;height:100%;object-fit:cover;">' +
+                  '</div>' +
+                  '<h1 style="font-size:1.25rem;font-weight:600;letter-spacing:-0.01em;margin:0 0 10px 0;color:var(--text-primary,#ffffff);">AUTONEXIS is taking longer than usual to load</h1>' +
+                  '<p style="font-size:0.9rem;line-height:1.55;color:var(--text-secondary,#94a3b8);margin:0 0 28px 0;">A network or cache delay is preventing the application from starting. Reload to reset local cache.</p>' +
+                  '<button type="button" id="autonexis-fallback-reload" style="display:inline-flex;align-items:center;justify-content:center;width:100%;padding:12px 24px;font-size:0.95rem;font-weight:500;color:var(--btn-primary-text,#000000);background-color:var(--btn-primary-bg,#ffffff);border:none;border-radius:9999px;cursor:pointer;transition:opacity 0.15s ease;">Reload</button>' +
+                '</div>' +
+              '</div>';
+            var btn = document.getElementById('autonexis-fallback-reload');
+            if (btn) {
+              btn.onclick = function() {
+                try {
+                  if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then(function(regs) {
+                      for (var i = 0; i < regs.length; i++) regs[i].unregister();
+                    });
+                  }
+                  if ('caches' in window) {
+                    caches.keys().then(function(keys) {
+                      for (var j = 0; j < keys.length; j++) caches.delete(keys[j]);
+                    });
+                  }
+                } catch (e) {}
+                window.location.reload();
+              };
+            }
+          }
+        }, 6000);
+
+        // Cancel timer as soon as React mounts children into #root
+        var observer = new MutationObserver(function() {
+          var root = document.getElementById('root');
+          if (root && root.children.length > 0) {
+            clearTimeout(timer);
+            observer.disconnect();
+          }
+        });
+        var rootNode = document.getElementById('root');
+        if (rootNode) {
+          observer.observe(rootNode, { childList: true });
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

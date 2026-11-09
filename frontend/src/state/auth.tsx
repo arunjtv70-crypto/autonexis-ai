@@ -159,20 +159,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
 
     // Check redirect result for mobile devices
-    getRedirectResult(auth)
-      .then((result) => {
-        if (result?.user) {
-          syncUser(result.user);
-        }
-      })
-      .catch((err) => {
-        console.warn("[AUTONEXIS] Redirect auth note:", err);
-      });
+    try {
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result?.user) {
+            syncUser(result.user);
+          }
+        })
+        .catch((err) => {
+          console.warn("[AUTONEXIS] Redirect auth note:", err);
+        });
+    } catch (e) {
+      console.warn("[AUTONEXIS] Redirect check init note:", e);
+    }
 
-    const unsubscribe = onAuthStateChanged(auth, async (current) => {
-      await syncUser(current);
+    let unsubscribe = () => {};
+    try {
+      unsubscribe = onAuthStateChanged(
+        auth,
+        async (current) => {
+          await syncUser(current);
+          setIsLoading(false);
+        },
+        (err) => {
+          console.warn("[AUTONEXIS] Auth state error:", err);
+          setIsLoading(false);
+        }
+      );
+    } catch (e) {
+      console.warn("[AUTONEXIS] onAuthStateChanged setup note:", e);
       setIsLoading(false);
-    });
+    }
 
     // Handle global 401 unauthorized event
     const handleUnauthorizedEvent = () => {

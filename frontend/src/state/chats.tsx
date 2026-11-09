@@ -320,7 +320,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     let channel: BroadcastChannel | null = null;
 
-    const handleSync = (type: string, uid?: string | null) => {
+    const handleSync = (_type: string, uid?: string | null) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
