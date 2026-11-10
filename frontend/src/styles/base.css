@@ -74,3 +74,16 @@ input, textarea, select {
   background: var(--text-muted);
 }
 
+/* Typography Text Size Variations */
+html[data-text-size="small"] {
+  font-size: 14px;
+}
+
+html[data-text-size="medium"] {
+  font-size: 16px;
+}
+
+html[data-text-size="large"] {
+  font-size: 18px;
+}
+

@@ -515,35 +515,383 @@ input:checked + .settings-switch-slider:before {
   outline: none;
 }
 
-/* Mobile Responsiveness */
-@media (max-width: 720px) {
+/* New Settings Tab & Controls Styles */
+.settings-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.settings-tab-desc {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-top: -0.3rem;
+  margin-bottom: 0.5rem;
+}
+
+.settings-save-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.5rem 0;
+}
+
+.settings-row-header-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-char-counter {
+  font-size: 0.74rem;
+  font-family: monospace;
+  color: var(--text-muted);
+}
+
+.settings-row-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-input-control.readonly {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+/* Modern iOS / Fluent Style Toggle Button */
+.settings-toggle-btn {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: 24px;
+  padding: 2px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.settings-toggle-btn.active {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-toggle-knob {
+  display: block;
+  width: 18px;
+  height: 18px;
+  background-color: var(--text-secondary);
+  border-radius: 50%;
+  transition: transform var(--transition-fast), background-color var(--transition-fast);
+}
+
+.settings-toggle-btn.active .settings-toggle-knob {
+  transform: translateX(20px);
+  background-color: #0c0c0e;
+}
+
+/* Privacy Callout */
+.settings-privacy-callout {
+  padding: 0.85rem 1rem;
+  background-color: rgba(200, 169, 126, 0.08);
+  border: 1px solid rgba(200, 169, 126, 0.2);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.settings-privacy-title {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.settings-privacy-callout p {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Add Memory Row */
+.settings-add-memory-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.settings-add-memory-row input {
+  flex: 1;
+  max-width: none;
+}
+
+/* Memories List */
+.settings-memories-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 0.5rem;
+}
+
+.settings-danger-link-btn {
+  background: none;
+  border: none;
+  color: var(--danger, #ef4444);
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.settings-danger-link-btn:hover {
+  opacity: 0.85;
+}
+
+.settings-memories-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.settings-memory-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.85rem;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  gap: 10px;
+}
+
+.settings-memory-text-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.settings-memory-text {
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.settings-memory-date {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.settings-memory-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-icon-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.settings-icon-action-btn:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.settings-icon-action-btn.danger:hover {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: var(--danger, #ef4444);
+}
+
+.settings-memory-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.settings-memory-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.settings-empty-memories {
+  padding: 1.5rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background-color: var(--surface-raised);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+/* Pill Group for Theme & Text Size */
+.settings-pill-group {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-pill-btn {
+  padding: 0.35rem 0.8rem;
+  font-size: 0.8rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.settings-pill-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+.settings-pill-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+  background-color: rgba(200, 169, 126, 0.1);
+}
+
+/* Inline Confirm Row */
+.settings-confirm-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-danger-warning {
+  font-size: 0.78rem;
+  color: var(--danger, #ef4444);
+  font-weight: 500;
+}
+
+/* About Box */
+.settings-about-box {
+  padding: 1rem;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.settings-about-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-about-name {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-about-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background-color: rgba(200, 169, 126, 0.18);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.settings-about-desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Toast Status Banner */
+.settings-toast-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0.55rem 0.9rem;
+  background-color: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: var(--radius-sm);
+  color: #4ade80;
+  font-size: 0.8rem;
+  animation: settings-shimmer 0.3s ease;
+}
+
+/* Mobile Responsiveness (Full Page on Phone) */
+@media (max-width: 640px) {
   .settings-modal-dialog {
     flex-direction: column;
-    height: 75vh;
+    height: 100%;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
   }
   .settings-sidebar {
     width: 100%;
     min-width: 100%;
     border-right: none;
     border-bottom: 1px solid var(--border-subtle);
-    max-height: 150px;
-    padding: 0.5rem;
+    max-height: none;
+    padding: 0.4rem 0.6rem;
+    gap: 0;
+    flex-shrink: 0;
   }
   .settings-nav-group {
     flex-direction: row;
     overflow-x: auto;
+    gap: 4px;
+    padding-bottom: 4px;
   }
   .settings-nav-header {
     display: none;
   }
+  .settings-nav-btn {
+    padding: 0.4rem 0.65rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    border-radius: var(--radius-sm);
+  }
+  .settings-sidebar-bottom {
+    display: none;
+  }
   .settings-main {
-    padding: 1rem;
+    padding: 1rem 0.85rem 2rem;
+    overflow-y: auto;
+    flex: 1;
   }
   .settings-row {
     flex-direction: column;
     align-items: flex-start;
+    gap: 0.6rem;
   }
   .settings-row-info {
     max-width: 100%;
   }
+  .settings-row-action {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .settings-input-control {
+    max-width: 100%;
+  }
 }
+

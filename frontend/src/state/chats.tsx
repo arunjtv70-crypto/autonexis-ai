@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import {
   postChatMessage,
   streamChatMessage,
+  extractMemoriesApi,
   type ChatMessagePayload,
   type MultimodalPart,
 } from "../api/client";
@@ -13,8 +14,17 @@ import {
   updateChatTitle as dbUpdateChatTitle,
   deleteOneChat as dbDeleteOneChat,
   deleteAllChats as dbDeleteAllChats,
+  loadUserPreferences,
+  saveUserPreferences,
+  loadUserMemories,
+  saveUserMemory,
+  deleteUserMemory,
+  deleteAllUserMemories,
+  exportAllUserChats,
   type FirestoreChatMeta,
   type FirestoreMessage,
+  type UserPreferences,
+  type FirestoreMemoryItem,
 } from "../db";
 
 export interface MessageItem {
@@ -49,6 +59,7 @@ export interface ChatItem {
   messages: MessageItem[];
   /** Whether messages have been loaded from Firestore yet */
   _messagesLoaded?: boolean;
+  _isTemporary?: boolean;
 }
 
 export interface UserMemoryStore {
@@ -61,6 +72,11 @@ export interface ChatsContextType {
   activeChatId: string | null;
   activeChat: ChatItem | null;
   memory: UserMemoryStore;
+  preferences: UserPreferences;
+  memories: FirestoreMemoryItem[];
+  isTemporaryChat: boolean;
+  startTemporaryChat: () => void;
+  exitTemporaryChat: () => void;
   createNewChat: () => string;
   selectChat: (id: string) => void;
   deleteChat: (id: string) => void;
@@ -68,6 +84,17 @@ export interface ChatsContextType {
   clearAllChats: () => void;
   resetMemory: () => void;
   updateCallName: (name: string) => void;
+  updatePreferences: (updates: Partial<UserPreferences>) => Promise<void>;
+  addMemoryManual: (text: string) => Promise<void>;
+  editMemory: (id: string, text: string) => Promise<void>;
+  deleteMemory: (id: string) => Promise<void>;
+  clearAllMemories: () => Promise<void>;
+  lastExtractedMemory: { id: string; text: string } | null;
+  undoLastMemory: () => Promise<void>;
+  clearLastExtractedMemory: () => void;
+  exportMyChats: () => Promise<void>;
+  isWebSearchActive: boolean;
+  setIsWebSearchActive: (active: boolean) => void;
   sendMessage: (
     content: string,
     mode?: "chat" | "image" | "video" | "voice",
@@ -298,6 +325,29 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return loadStoredMemory(currentUid, defName);
   });
 
+  // Settings / Preferences state
+  const [preferences, setPreferences] = useState<UserPreferences>({
+    memoryEnabled: true,
+    webSearchDefault: false,
+    theme: "auto",
+    textSize: "Medium",
+    responseStyle: "Default",
+    language: "Auto",
+  });
+
+  // Stored memories state
+  const [memories, setMemories] = useState<FirestoreMemoryItem[]>([]);
+  const [lastExtractedMemory, setLastExtractedMemory] = useState<{ id: string; text: string } | null>(null);
+
+  // Temporary chat state
+  const [isTemporaryChat, setIsTemporaryChat] = useState<boolean>(false);
+
+  // Web search active state (per-chat override initialized from preference)
+  const [isWebSearchActive, setIsWebSearchActive] = useState<boolean>(false);
+
+  // Message count for extraction trigger (trigger once every 3 user messages)
+  const userMessagesCountRef = useRef<number>(0);
+
   // Chat state
   const [chats, setChats] = useState<ChatItem[]>(() => {
     if (currentUid === "guest") return loadGuestChats();
@@ -428,6 +478,42 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   // -----------------------------------------------------------------------
+  // Load preferences and memories from Firestore
+  // -----------------------------------------------------------------------
+  const loadPreferencesAndMemories = useCallback(async (uid: string) => {
+    if (!uid || uid === "guest") {
+      setMemories([]);
+      setPreferences({
+        memoryEnabled: true,
+        webSearchDefault: false,
+        theme: "auto",
+        textSize: "Medium",
+        responseStyle: "Default",
+        language: "Auto",
+      });
+      return;
+    }
+    try {
+      const prefs = await loadUserPreferences(uid);
+      if (prefs) {
+        setPreferences((prev) => ({ ...prev, ...prefs }));
+        setIsWebSearchActive(!!prefs.webSearchDefault);
+        if (prefs.textSize && typeof document !== "undefined") {
+          document.documentElement.setAttribute("data-text-size", prefs.textSize.toLowerCase());
+        }
+      }
+    } catch (err) {
+      console.warn("[AUTONEXIS] Failed to load user preferences:", err);
+    }
+    try {
+      const mems = await loadUserMemories(uid);
+      setMemories(mems);
+    } catch (err) {
+      console.warn("[AUTONEXIS] Failed to load user memories:", err);
+    }
+  }, []);
+
+  // -----------------------------------------------------------------------
   // Account switching / login / logout
   // -----------------------------------------------------------------------
   useEffect(() => {
@@ -446,11 +532,13 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (currentUid && currentUid !== "guest") {
         // Authenticated user → load from Firestore
         loadChatsFromFirestore(currentUid);
+        loadPreferencesAndMemories(currentUid);
       } else if (currentUid === "guest") {
         // Guest → load from localStorage
         const loaded = loadGuestChats();
         setChats(loaded);
         setActiveChatId(loaded[0]?.id || null);
+        loadPreferencesAndMemories("guest");
         try {
           setGuestMsgCount(parseInt(localStorage.getItem(GUEST_MSG_COUNT_KEY) || "0", 10));
         } catch {
@@ -463,18 +551,20 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setActiveChatId(fresh.id);
         loadedChatIdsRef.current = new Set();
         savedMsgIdsRef.current = new Set();
+        loadPreferencesAndMemories("");
       }
 
       const defName = user?.display_name && user.display_name !== "User" ? user.display_name : "User";
       setMemory(loadStoredMemory(currentUid, defName));
       setFirestoreError(null);
     }
-  }, [currentUid, user?.display_name, loadChatsFromFirestore]);
+  }, [currentUid, user?.display_name, loadChatsFromFirestore, loadPreferencesAndMemories]);
 
   // Initial Firestore load for authenticated users on first mount
   useEffect(() => {
     if (isAuthenticated && currentUid && currentUid !== "guest") {
       loadChatsFromFirestore(currentUid);
+      loadPreferencesAndMemories(currentUid);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -484,11 +574,12 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible" && isAuthenticated && currentUid && currentUid !== "guest") {
         loadChatsFromFirestore(currentUid);
+        loadPreferencesAndMemories(currentUid);
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [isAuthenticated, currentUid, loadChatsFromFirestore]);
+  }, [isAuthenticated, currentUid, loadChatsFromFirestore, loadPreferencesAndMemories]);
 
   // Sync memory to user-namespaced localStorage (memory is still localStorage, not Firestore)
   useEffect(() => {
@@ -599,6 +690,161 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const selectChat = (id: string) => {
     setActiveChatId(id);
+    const chat = chats.find((c) => c.id === id);
+    setIsTemporaryChat(!!chat?._isTemporary);
+  };
+
+  const startTemporaryChat = () => {
+    const tempChat: ChatItem = {
+      id: "temp-" + Date.now(),
+      title: "Temporary Chat",
+      updated_at: new Date().toISOString(),
+      messages: [],
+      _messagesLoaded: true,
+      _isTemporary: true,
+    };
+    setIsTemporaryChat(true);
+    setChats((prev) => [tempChat, ...prev]);
+    setActiveChatId(tempChat.id);
+  };
+
+  const exitTemporaryChat = () => {
+    setIsTemporaryChat(false);
+    setChats((prev) => {
+      const remaining = prev.filter((c) => !c._isTemporary);
+      if (remaining.length > 0) {
+        setActiveChatId(remaining[0].id);
+        return remaining;
+      }
+      const fresh = createEmptyChat();
+      setActiveChatId(fresh.id);
+      return [fresh];
+    });
+  };
+
+  const updatePreferences = async (updates: Partial<UserPreferences>) => {
+    setPreferences((prev) => {
+      const next = { ...prev, ...updates };
+      if (updates.textSize && typeof document !== "undefined") {
+        document.documentElement.setAttribute("data-text-size", updates.textSize.toLowerCase());
+      }
+      return next;
+    });
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        await saveUserPreferences(currentUid, updates);
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to save user preferences:", err);
+      }
+    }
+  };
+
+  const addMemoryManual = async (text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        const saved = await saveUserMemory(currentUid, clean);
+        setMemories((prev) => [saved, ...prev.filter((m) => m.id !== saved.id)]);
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to add memory:", err);
+      }
+    } else {
+      const localMem: FirestoreMemoryItem = {
+        id: "mem_" + Date.now(),
+        text: clean,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setMemories((prev) => [localMem, ...prev]);
+    }
+  };
+
+  const editMemory = async (id: string, text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        const saved = await saveUserMemory(currentUid, clean, id);
+        setMemories((prev) => prev.map((m) => (m.id === id ? saved : m)));
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to edit memory:", err);
+      }
+    } else {
+      setMemories((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, text: clean, updatedAt: new Date().toISOString() } : m))
+      );
+    }
+  };
+
+  const deleteMemory = async (id: string) => {
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        await deleteUserMemory(currentUid, id);
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to delete memory:", err);
+      }
+    }
+    setMemories((prev) => prev.filter((m) => m.id !== id));
+  };
+
+  const clearAllMemories = async () => {
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        await deleteAllUserMemories(currentUid);
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to delete all memories:", err);
+      }
+    }
+    setMemories([]);
+    setLastExtractedMemory(null);
+  };
+
+  const undoLastMemory = async () => {
+    if (!lastExtractedMemory) return;
+    await deleteMemory(lastExtractedMemory.id);
+    setLastExtractedMemory(null);
+  };
+
+  const clearLastExtractedMemory = () => {
+    setLastExtractedMemory(null);
+  };
+
+  const exportMyChats = async () => {
+    try {
+      let exportData: any;
+      if (isAuthenticated && currentUid && currentUid !== "guest") {
+        exportData = await exportAllUserChats(currentUid);
+      } else {
+        exportData = {
+          exportDate: new Date().toISOString(),
+          account: isGuest ? "guest" : "offline",
+          chats: chats.map((c) => ({
+            id: c.id,
+            title: c.title,
+            createdAt: c.updated_at,
+            updatedAt: c.updated_at,
+            messages: c.messages.map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              createdAt: m.created_at || new Date().toISOString(),
+            })),
+          })),
+        };
+      }
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `autonexis_chats_export_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("[AUTONEXIS] Failed to export chats:", err);
+    }
   };
 
   const deleteChat = (id: string) => {
@@ -825,6 +1071,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
 
     const currentChat = chats.find((c) => c.id === targetChatId);
+    const isTemp = isTemporaryChat || !!currentChat?._isTemporary;
     const isFirst = !currentChat || currentChat.messages.length === 0;
     const words = (trimmed || fileLabel).split(" ");
     const autoTitle = isFirst ? (words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")) : currentChat!.title;
@@ -854,9 +1101,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch {}
     }
 
-    // Save user message to Firestore immediately (fire-and-forget)
+    // Save user message to Firestore immediately (fire-and-forget, skip for temporary chats)
     const capturedChatId = targetChatId;
-    if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(userMsg.id)) {
+    if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(userMsg.id)) {
       savedMsgIdsRef.current.add(userMsg.id);
       backgroundSave(
         {
@@ -899,8 +1146,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
         setIsSending(false);
 
-        // Save assistant message to Firestore
-        if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
+        // Save assistant message to Firestore (skip for temporary chats)
+        if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
           savedMsgIdsRef.current.add(assistantMsg.id);
           backgroundSave(
             {
@@ -943,8 +1190,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
         setIsSending(false);
 
-        // Save assistant message to Firestore
-        if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
+        // Save assistant message to Firestore (skip for temporary chats)
+        if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
           savedMsgIdsRef.current.add(assistantMsg.id);
           backgroundSave(
             {
@@ -1110,7 +1357,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // Save assistant reply to Firestore ONCE after stream finishes
     const saveAssistantReply = (finalContent: string) => {
-      if (isAuthenticated && requestUid && requestUid !== "guest" && !savedMsgIdsRef.current.has(assistantMsgId)) {
+      if (!isTemp && isAuthenticated && requestUid && requestUid !== "guest" && !savedMsgIdsRef.current.has(assistantMsgId)) {
         savedMsgIdsRef.current.add(assistantMsgId);
         backgroundSave(
           {
@@ -1122,6 +1369,42 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setFirestoreError
         );
       }
+    };
+
+    const triggerMemoryExtraction = (latestUserText: string, assistantReplyText: string) => {
+      if (isGuest || isTemp || preferences.memoryEnabled === false) return;
+      if (!latestUserText || latestUserText.trim().length < 15) return;
+      if (!isAuthenticated || !requestUid || requestUid === "guest") return;
+
+      userMessagesCountRef.current += 1;
+      if (userMessagesCountRef.current < 3) return;
+
+      userMessagesCountRef.current = 0;
+      (async () => {
+        try {
+          const changes = await extractMemoriesApi(
+            [
+              ...historyPayload.slice(-4),
+              { role: "assistant", content: assistantReplyText },
+            ],
+            memories.map((m) => ({ id: m.id, text: m.text })),
+            isGuest
+          );
+          for (const change of changes) {
+            if (change.action === "add" && change.text) {
+              const saved = await saveUserMemory(requestUid, change.text);
+              setMemories((prev) => [saved, ...prev.filter((m) => m.id !== saved.id)]);
+              setLastExtractedMemory({ id: saved.id, text: saved.text });
+            } else if (change.action === "update" && change.text && change.target_id) {
+              const saved = await saveUserMemory(requestUid, change.text, change.target_id);
+              setMemories((prev) => prev.map((m) => (m.id === change.target_id ? saved : m)));
+              setLastExtractedMemory({ id: saved.id, text: saved.text });
+            }
+          }
+        } catch (err) {
+          console.warn("[AUTONEXIS] Memory extraction background failed:", err);
+        }
+      })();
     };
 
     const pumpAnimation = (now: number) => {
@@ -1145,6 +1428,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           stopAnimation();
           // Save final content to Firestore
           saveAssistantReply(displayedBuffer);
+          triggerMemoryExtraction(trimmed, displayedBuffer);
           setIsSending(false);
           return;
         }
@@ -1175,10 +1459,23 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       animFrameId = requestAnimationFrame(pumpAnimation);
     };
 
+    const memoryAllowed = !isTemp && preferences.memoryEnabled !== false;
+    const userContext = {
+      nickname: preferences.nickname || undefined,
+      preferences: preferences.customInstructions || undefined,
+      response_style: preferences.responseStyle || "Default",
+      language: preferences.language || "Auto",
+      memories: memoryAllowed
+        ? memories.slice(0, 15).map((m) => ({ id: m.id, text: m.text }))
+        : [],
+      web_search: isWebSearchActive,
+    };
+
     try {
       await streamChatMessage(
         historyPayload,
         memoryPrompt,
+        userContext,
         // onChunk
         (chunk) => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
@@ -1209,6 +1506,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           if (prefersReducedMotion || pendingBuffer.length === 0) {
             stopAnimation();
             saveAssistantReply(displayedBuffer);
+            triggerMemoryExtraction(trimmed, displayedBuffer);
             setIsSending(false);
           }
         },
@@ -1222,15 +1520,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
           if (!displayedBuffer && !pendingBuffer) {
             try {
-              const reply = await postChatMessage(historyPayload, memoryPrompt, isGuest);
+              const reply = await postChatMessage(historyPayload, memoryPrompt, userContext, isGuest);
               if (activeUidRef.current !== requestUid || controller.signal.aborted) {
                 return;
               }
               flushDisplay(reply);
               saveAssistantReply(reply);
+              triggerMemoryExtraction(trimmed, reply);
             } catch {}
           } else {
             saveAssistantReply(displayedBuffer);
+            triggerMemoryExtraction(trimmed, displayedBuffer);
           }
           stopAnimation();
           setIsSending(false);
@@ -1252,6 +1552,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         activeChatId,
         activeChat,
         memory,
+        preferences,
+        memories,
+        isTemporaryChat,
+        startTemporaryChat,
+        exitTemporaryChat,
         createNewChat,
         selectChat,
         deleteChat,
@@ -1259,6 +1564,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         clearAllChats,
         resetMemory,
         updateCallName,
+        updatePreferences,
+        addMemoryManual,
+        editMemory,
+        deleteMemory,
+        clearAllMemories,
+        lastExtractedMemory,
+        undoLastMemory,
+        clearLastExtractedMemory,
+        exportMyChats,
+        isWebSearchActive,
+        setIsWebSearchActive,
         sendMessage,
         isSending,
         guestMsgCount,

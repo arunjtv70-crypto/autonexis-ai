@@ -29,6 +29,10 @@ import {
   IconFileText,
   IconSparkles,
   IconChevronDown,
+  IconShield,
+  IconGlobe,
+  IconBrain,
+  IconPaperclip,
 } from "../components/Icons";
 import "./ChatScreen.css";
 
@@ -44,6 +48,14 @@ export const ChatScreen: React.FC = () => {
     activeChat,
     activeChatId,
     memory,
+    isTemporaryChat,
+    startTemporaryChat,
+    exitTemporaryChat,
+    isWebSearchActive,
+    setIsWebSearchActive,
+    lastExtractedMemory,
+    undoLastMemory,
+    clearLastExtractedMemory,
     selectChat,
     createNewChat,
     deleteChat,
@@ -67,6 +79,10 @@ export const ChatScreen: React.FC = () => {
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("account");
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Attachment & Tool Menus
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const [isHomeAttachmentMenuOpen, setIsHomeAttachmentMenuOpen] = useState(false);
 
   // Creative Studio Mode: "chat" | "image" | "video" | "voice"
   const [inputMode, setInputMode] = useState<"chat" | "image" | "video" | "voice">("chat");
@@ -361,6 +377,21 @@ export const ChatScreen: React.FC = () => {
 
         <button
           type="button"
+          className={`sidebar-nav-btn ${isTemporaryChat ? "active" : ""}`}
+          onClick={() => {
+            startTemporaryChat();
+            setIsMobileMenuOpen(false);
+          }}
+          title="Temporary Chat (Conversations & memory are paused)"
+        >
+          <div className="sidebar-nav-btn-left">
+            <IconShield size={16} />
+            <span>Temporary Chat</span>
+          </div>
+        </button>
+
+        <button
+          type="button"
           className="sidebar-nav-btn"
           onClick={() => {
             const input = document.querySelector(".search-input") as HTMLInputElement;
@@ -614,6 +645,23 @@ export const ChatScreen: React.FC = () => {
           </div>
         </header>
 
+        {/* Temporary Chat Mode Banner */}
+        {isTemporaryChat && (
+          <div className="temporary-chat-banner" role="alert">
+            <div className="temporary-chat-banner-left">
+              <IconShield size={15} />
+              <span>Temporary Chat active · Messages are not saved to history and memories are paused.</span>
+            </div>
+            <button
+              type="button"
+              className="temporary-chat-exit-btn"
+              onClick={exitTemporaryChat}
+            >
+              Exit
+            </button>
+          </div>
+        )}
+
         {/* Hidden File Input for Image & Code Uploads (supports multiple images) */}
         <input
           type="file"
@@ -743,22 +791,62 @@ export const ChatScreen: React.FC = () => {
 
                 <div className="chat-input-card-bottom">
                   <div className="input-toolbar-left">
-                    {/* File Attachment Button */}
-                    <button
-                      type="button"
-                      className="input-tool-icon-btn"
-                      onClick={() => {
-                        if (isGuest) {
-                          setShowGuestLimitModal(true);
-                          return;
-                        }
-                        fileInputRef.current?.click();
-                      }}
-                      title={isGuest ? "Log in to attach images & files" : "Attach image or code file"}
-                      aria-label="Attach file"
-                    >
-                      <IconPlus size={16} />
-                    </button>
+                    {/* Attachment & Tools Dropdown Button */}
+                    <div style={{ position: "relative" }}>
+                      <button
+                        type="button"
+                        className="input-tool-icon-btn"
+                        onClick={() => setIsHomeAttachmentMenuOpen((prev) => !prev)}
+                        title="Add attachments or tools"
+                        aria-label="Add attachments or tools"
+                      >
+                        <IconPlus size={16} />
+                      </button>
+
+                      {isHomeAttachmentMenuOpen && (
+                        <div className="attachment-dropdown-menu">
+                          <button
+                            type="button"
+                            className="attachment-dropdown-item"
+                            onClick={() => {
+                              setIsHomeAttachmentMenuOpen(false);
+                              if (isGuest) {
+                                setShowGuestLimitModal(true);
+                                return;
+                              }
+                              fileInputRef.current?.click();
+                            }}
+                          >
+                            <IconPaperclip size={14} />
+                            <span>Attach image or file</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            className={`attachment-dropdown-item ${isWebSearchActive ? "active" : ""}`}
+                            onClick={() => {
+                              if (isGuest) {
+                                setShowGuestLimitModal(true);
+                                return;
+                              }
+                              setIsWebSearchActive(!isWebSearchActive);
+                              setIsHomeAttachmentMenuOpen(false);
+                            }}
+                          >
+                            <IconGlobe size={14} />
+                            <span>Web Search ({isWebSearchActive ? "ON" : "OFF"})</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Active Web Search Indicator Pill */}
+                    {isWebSearchActive && (
+                      <div className="active-websearch-pill" title="Web search active for this chat">
+                        <IconGlobe size={12} />
+                        <span>Web Search</span>
+                      </div>
+                    )}
 
                     {/* Mode Selector Dropdown */}
                     <div style={{ position: "relative" }}>
@@ -1082,6 +1170,34 @@ export const ChatScreen: React.FC = () => {
         {/* Bottom Input Zone (Visible when in active conversation) */}
         {activeChat && activeChat.messages.length > 0 && (
           <footer className="conversation-input-bar">
+            {/* Calm Memory Saved Pill */}
+            {lastExtractedMemory && (
+              <div className="memory-saved-toast-pill" role="status">
+                <div className="memory-saved-toast-left">
+                  <IconBrain size={14} />
+                  <span>Saved to memory: <strong>{lastExtractedMemory.text}</strong></span>
+                </div>
+                <div className="memory-saved-toast-actions">
+                  <button
+                    type="button"
+                    className="memory-undo-btn"
+                    onClick={undoLastMemory}
+                    title="Undo and delete this memory"
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    className="memory-dismiss-btn"
+                    onClick={clearLastExtractedMemory}
+                    aria-label="Dismiss"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            )}
+
             {firestoreError && (
               <div
                 style={{
@@ -1178,22 +1294,62 @@ export const ChatScreen: React.FC = () => {
 
               <div className="chat-input-card-bottom">
                 <div className="input-toolbar-left">
-                  {/* File Attachment Button */}
-                  <button
-                    type="button"
-                    className="input-tool-icon-btn"
-                    onClick={() => {
-                      if (isGuest) {
-                        setShowGuestLimitModal(true);
-                        return;
-                      }
-                      fileInputRef.current?.click();
-                    }}
-                    title={isGuest ? "Log in to attach images & files" : "Attach image or code file"}
-                    aria-label="Attach file"
-                  >
-                    <IconPlus size={16} />
-                  </button>
+                  {/* Attachment & Tools Dropdown Button */}
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      className="input-tool-icon-btn"
+                      onClick={() => setIsAttachmentMenuOpen((prev) => !prev)}
+                      title="Add attachments or tools"
+                      aria-label="Add attachments or tools"
+                    >
+                      <IconPlus size={16} />
+                    </button>
+
+                    {isAttachmentMenuOpen && (
+                      <div className="attachment-dropdown-menu">
+                        <button
+                          type="button"
+                          className="attachment-dropdown-item"
+                          onClick={() => {
+                            setIsAttachmentMenuOpen(false);
+                            if (isGuest) {
+                              setShowGuestLimitModal(true);
+                              return;
+                            }
+                            fileInputRef.current?.click();
+                          }}
+                        >
+                          <IconPaperclip size={14} />
+                          <span>Attach image or file</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className={`attachment-dropdown-item ${isWebSearchActive ? "active" : ""}`}
+                          onClick={() => {
+                            if (isGuest) {
+                              setShowGuestLimitModal(true);
+                              return;
+                            }
+                            setIsWebSearchActive(!isWebSearchActive);
+                            setIsAttachmentMenuOpen(false);
+                          }}
+                        >
+                          <IconGlobe size={14} />
+                          <span>Web Search ({isWebSearchActive ? "ON" : "OFF"})</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Active Web Search Indicator Pill */}
+                  {isWebSearchActive && (
+                    <div className="active-websearch-pill" title="Web search active for this chat">
+                      <IconGlobe size={12} />
+                      <span>Web Search</span>
+                    </div>
+                  )}
 
                   {/* Mode Selector Pill */}
                   <div style={{ position: "relative" }}>

@@ -12,6 +12,8 @@ from prompts import (
     ABUSE_AND_SAFETY_PROMPT,
     TABLE_AND_LAYOUT_PROMPT,
     IMAGE_REASONING_PROMPT,
+    MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    format_user_context_block,
 )
 from profanity_blocklist import contains_profanity, get_polite_fallback
 
@@ -152,12 +154,13 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
+        user_context: Optional[Dict[str, Any]] = None,
         max_history: int = 18,
         is_math: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory,
-        abuse & safety rules, math rigor prompt (if math detected), and language matching directive.
+        user personalization context, abuse & safety rules, math rigor prompt, and language matching directive.
         """
         extra_system_context = []
 
@@ -166,6 +169,12 @@ class LLMClient:
 
         # Always include mobile layout, headings, and table policy
         extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
+
+        # Include user personalization context block (nickname, preferences, memories, styles)
+        if user_context:
+            context_block = format_user_context_block(user_context)
+            if context_block:
+                extra_system_context.append(context_block)
 
         # Include image understanding & puzzle reasoning policy if images present
         if has_image_content(messages):
@@ -271,6 +280,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
+        user_context: Optional[Dict[str, Any]] = None,
         is_guest: bool = False
     ) -> AsyncGenerator[str, None]:
         """
@@ -294,7 +304,7 @@ class LLMClient:
         # -------------------------------------------------------------------
         if is_math:
             max_tokens = 512 if is_guest else 3000
-            conversation = self._prepare_messages(messages, user_memory, is_math=True)
+            conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=True)
             tools = [EXACT_MATH_TOOL_DEFINITION]
 
             try:
@@ -373,7 +383,7 @@ class LLMClient:
         # GENERAL CHAT & VISION ROUTE: True Real-time SSE Token Streaming
         # -------------------------------------------------------------------
         max_tokens = 512 if is_guest else 2048
-        conversation = self._prepare_messages(messages, user_memory, is_math=False)
+        conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=False)
 
         # Optional Think Mode Self-Check for Images/Complex Reasoning
         enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
@@ -489,6 +499,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
+        user_context: Optional[Dict[str, Any]] = None,
         is_guest: bool = False
     ) -> Dict[str, str]:
         """
@@ -507,7 +518,7 @@ class LLMClient:
 
         if is_math:
             max_tokens = 512 if is_guest else 3000
-            conversation = self._prepare_messages(messages, user_memory, is_math=True)
+            conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=True)
             tools = [EXACT_MATH_TOOL_DEFINITION]
 
             try:
@@ -565,7 +576,7 @@ class LLMClient:
                 return {"reply": fallback_error_msg}
 
         max_tokens = 512 if is_guest else 2048
-        conversation = self._prepare_messages(messages, user_memory, is_math=False)
+        conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=False)
         payload = {
             "model": active_model,
             "messages": conversation,
@@ -591,5 +602,84 @@ class LLMClient:
         except Exception as e:
             logger.error(f"[AUTONEXIS LLM EXCEPTION] {e}")
             return {"reply": fallback_error_msg}
+
+    async def extract_memories(
+        self,
+        messages: List[Dict[str, Any]],
+        existing_memories: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Cheap, fast LLM call to extract durable facts from recent chat turn.
+        Guarded by rate-limit backoff and returns empty changes on any error.
+        """
+        import time as _time
+        now = _time.time()
+        if getattr(self, "_last_rate_limit_ts", 0) and (now - self._last_rate_limit_ts < 60):
+            logger.info("Skipping memory extraction due to recent provider rate limit backoff")
+            return {"changes": []}
+
+        recent_turns = []
+        for m in messages[-6:]:
+            role = m.get("role", "user")
+            text = extract_text_from_content(m.get("content", ""))
+            if text:
+                recent_turns.append(f"{role.upper()}: {text[:400]}")
+
+        if not recent_turns:
+            return {"changes": []}
+
+        existing_str = ""
+        if existing_memories:
+            existing_lines = [f"- [ID: {em.get('id', '')}]: {em.get('text', '')}" for em in existing_memories[:50]]
+            existing_str = "\nEXISTING MEMORIES:\n" + "\n".join(existing_lines)
+
+        user_prompt = f"CONVERSATION HISTORY:\n" + "\n".join(recent_turns) + existing_str + "\n\nExtract changes as strict JSON:"
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": MEMORY_EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.0,
+            "max_tokens": 300,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                res = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload
+                )
+                if res.status_code == 429:
+                    self._last_rate_limit_ts = _time.time()
+                    return {"changes": []}
+                
+                if res.status_code != 200:
+                    return {"changes": []}
+
+                data = res.json()
+                raw_content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                if raw_content.startswith("```"):
+                    raw_content = re.sub(r"^```[a-zA-Z]*\n?", "", raw_content)
+                    raw_content = re.sub(r"\n?```$", "", raw_content).strip()
+
+                parsed = json.loads(raw_content)
+                if isinstance(parsed, dict) and "changes" in parsed:
+                    clean_changes = []
+                    for ch in parsed["changes"]:
+                        if isinstance(ch, dict) and ch.get("action") in ("add", "update", "none"):
+                            if ch.get("action") != "none" and not ch.get("text"):
+                                continue
+                            clean_changes.append(ch)
+                    return {"changes": clean_changes}
+                return {"changes": []}
+        except Exception as e:
+            logger.warning(f"Memory extraction non-blocking error: {e}")
+            return {"changes": []}
 
 llm_client = LLMClient()

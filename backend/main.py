@@ -57,6 +57,19 @@ class DirectChatRequest(BaseModel):
     messages: List[MessageItem]
     chat_id: Optional[str] = None
     user_memory: Optional[str] = None
+    user_context: Optional[Dict[str, Any]] = None
+
+class MemoryExtractMessage(BaseModel):
+    role: str
+    content: Union[str, List[Dict[str, Any]]]
+
+class ExistingMemoryItem(BaseModel):
+    id: Optional[str] = None
+    text: str
+
+class MemoryExtractRequest(BaseModel):
+    messages: List[MemoryExtractMessage]
+    existing_memories: Optional[List[ExistingMemoryItem]] = None
 
 # Soft in-memory rate limiting for guest sessions.
 # Note: In a serverless/stateless environment (such as Vercel) without a shared database/cache,
@@ -128,7 +141,12 @@ async def chat_direct(
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
     
     messages_payload = [m.model_dump() for m in req.messages]
-    result = await llm_client.chat_non_stream(messages_payload, req.user_memory, is_guest=is_guest)
+    result = await llm_client.chat_non_stream(
+        messages_payload,
+        req.user_memory,
+        user_context=req.user_context,
+        is_guest=is_guest
+    )
     return result
 
 @app.post("/api/chat/stream")
@@ -174,7 +192,12 @@ async def chat_stream_endpoint(
 
     messages_payload = [m.model_dump() for m in req.messages]
     return StreamingResponse(
-        llm_client.chat_stream(messages_payload, req.user_memory, is_guest=is_guest),
+        llm_client.chat_stream(
+            messages_payload,
+            req.user_memory,
+            user_context=req.user_context,
+            is_guest=is_guest
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -182,6 +205,20 @@ async def chat_stream_endpoint(
             "X-Accel-Buffering": "no"
         }
     )
+
+@app.post("/api/memory/extract")
+@app.post("/memory/extract")
+async def extract_memory_endpoint(
+    req: MemoryExtractRequest,
+    request: Request,
+):
+    """
+    Extracts durable user facts from recent messages using strict JSON format.
+    Safely handles rate limits and sensitive data omission.
+    """
+    messages_payload = [m.model_dump() for m in req.messages]
+    existing_payload = [m.model_dump() for m in (req.existing_memories or [])]
+    return await llm_client.extract_memories(messages_payload, existing_payload)
 
 # -------------------------------------------------------------
 # UNIFIED FRONTEND SERVING (SINGLE WORKING LINK: http://localhost:8000)

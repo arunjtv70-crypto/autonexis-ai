@@ -268,3 +268,176 @@ export async function chatExists(uid: string, chatId: string): Promise<boolean> 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Settings / Preferences (users/{uid}/settings/preferences)
+// ---------------------------------------------------------------------------
+
+export interface UserPreferences {
+  displayName?: string;
+  nickname?: string;
+  customInstructions?: string;
+  responseStyle?: "Default" | "Short and direct" | "Detailed" | "Casual Hinglish" | "Formal";
+  language?: "Auto" | "Hindi" | "Hinglish" | "English";
+  memoryEnabled?: boolean;
+  webSearchDefault?: boolean;
+  theme?: "light" | "dark" | "auto";
+  textSize?: "Small" | "Medium" | "Large";
+  updatedAt?: string;
+}
+
+export async function loadUserPreferences(uid: string): Promise<UserPreferences | null> {
+  try {
+    const prefRef = doc(db(), "users", uid, "settings", "preferences");
+    const snap = await getDoc(prefRef);
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    return {
+      displayName: data.displayName,
+      nickname: data.nickname,
+      customInstructions: data.customInstructions,
+      responseStyle: data.responseStyle,
+      language: data.language,
+      memoryEnabled: data.memoryEnabled ?? true,
+      webSearchDefault: data.webSearchDefault ?? false,
+      theme: data.theme,
+      textSize: data.textSize || "Medium",
+      updatedAt: tsToISO(data.updatedAt),
+    };
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to load user preferences:", err);
+    return null;
+  }
+}
+
+export async function saveUserPreferences(
+  uid: string,
+  prefs: Partial<UserPreferences>
+): Promise<void> {
+  const prefRef = doc(db(), "users", uid, "settings", "preferences");
+  await setDoc(
+    prefRef,
+    {
+      ...prefs,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Memory Store (users/{uid}/memories/{id})
+// ---------------------------------------------------------------------------
+
+export interface FirestoreMemoryItem {
+  id: string;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function loadUserMemories(uid: string): Promise<FirestoreMemoryItem[]> {
+  try {
+    const memRef = collection(db(), "users", uid, "memories");
+    const q = query(memRef, orderBy("createdAt", "desc"), limit(100));
+    const snap = await getDocs(q);
+    const list: FirestoreMemoryItem[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({
+        id: d.id,
+        text: data.text || "",
+        createdAt: tsToISO(data.createdAt),
+        updatedAt: tsToISO(data.updatedAt),
+      });
+    });
+    return list;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to load user memories:", err);
+    return [];
+  }
+}
+
+export async function saveUserMemory(
+  uid: string,
+  text: string,
+  id?: string
+): Promise<FirestoreMemoryItem> {
+  const memId = id || "mem_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+  const memDocRef = doc(db(), "users", uid, "memories", memId);
+  const cleanText = text.trim().slice(0, 200);
+
+  await setDoc(
+    memDocRef,
+    {
+      text: cleanText,
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return {
+    id: memId,
+    text: cleanText,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function deleteUserMemory(uid: string, memoryId: string): Promise<void> {
+  await deleteDoc(doc(db(), "users", uid, "memories", memoryId));
+}
+
+export async function deleteAllUserMemories(uid: string): Promise<void> {
+  const memRef = collection(db(), "users", uid, "memories");
+  let keepGoing = true;
+  while (keepGoing) {
+    const snap = await getDocs(query(memRef, limit(200)));
+    if (snap.empty) {
+      keepGoing = false;
+      break;
+    }
+    const batch = writeBatch(db());
+    snap.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export All User Chats (Full JSON Download)
+// ---------------------------------------------------------------------------
+
+export interface ExportedChatData {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: FirestoreMessage[];
+}
+
+export async function exportAllUserChats(uid: string): Promise<{
+  exportDate: string;
+  account: string;
+  chats: ExportedChatData[];
+}> {
+  const result = await loadChatList(uid, 500);
+  const exportedChats: ExportedChatData[] = [];
+
+  for (const meta of result.chats) {
+    const msgs = await loadChatMessages(uid, meta.id);
+    exportedChats.push({
+      id: meta.id,
+      title: meta.title,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt,
+      messages: msgs,
+    });
+  }
+
+  return {
+    exportDate: new Date().toISOString(),
+    account: uid,
+    chats: exportedChats,
+  };
+}
+

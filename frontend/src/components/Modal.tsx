@@ -8,6 +8,7 @@ interface ModalProps {
   title?: string;
   children: React.ReactNode;
   maxWidth?: string;
+  className?: string;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -16,6 +17,7 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   children,
   maxWidth = "520px",
+  className = "",
 }) => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -38,7 +40,7 @@ export const Modal: React.FC<ModalProps> = ({
   return (
     <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
       <div
-        className="modal-content"
+        className={`modal-content ${className}`.trim()}
         style={{ maxWidth }}
         onClick={(e) => e.stopPropagation()}
       >

@@ -55,6 +55,7 @@ async function handleUnauthorized(): Promise<void> {
 export async function postChatMessage(
   messages: ChatMessagePayload[],
   userMemory?: string,
+  userContext?: any,
   isGuest = false
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat`;
@@ -66,6 +67,7 @@ export async function postChatMessage(
       body: JSON.stringify({
         messages,
         user_memory: userMemory || undefined,
+        user_context: userContext || undefined,
       }),
     });
 
@@ -89,6 +91,7 @@ export async function postChatMessage(
 export async function streamChatMessage(
   messages: ChatMessagePayload[],
   userMemory: string | undefined,
+  userContext: any | undefined,
   onChunk: (token: string) => void,
   onDone: () => void,
   onError: (err: any) => void,
@@ -105,6 +108,7 @@ export async function streamChatMessage(
       body: JSON.stringify({
         messages,
         user_memory: userMemory || undefined,
+        user_context: userContext || undefined,
       }),
     });
 
@@ -116,7 +120,7 @@ export async function streamChatMessage(
 
     if (!res.ok || !res.body) {
       // Fallback to non-streaming if stream is unsupported
-      const directReply = await postChatMessage(messages, userMemory, isGuest);
+      const directReply = await postChatMessage(messages, userMemory, userContext, isGuest);
       onChunk(directReply);
       onDone();
       return;
@@ -169,5 +173,36 @@ export async function streamChatMessage(
       return;
     }
     onError(err);
+  }
+}
+
+export interface MemoryExtractAction {
+  action: "add" | "update" | "none";
+  text?: string;
+  target_id?: string;
+}
+
+export async function extractMemoriesApi(
+  messages: Array<{ role: string; content: any }>,
+  existingMemories?: Array<{ id?: string; text: string }>,
+  isGuest = false
+): Promise<MemoryExtractAction[]> {
+  const url = `${API_BASE_URL}/memory/extract`;
+  try {
+    const headers = await getAuthHeaders(isGuest);
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        messages,
+        existing_memories: existingMemories || [],
+      }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.changes) ? data.changes : [];
+  } catch (err) {
+    console.warn("[AUTONEXIS] Memory extraction API call error:", err);
+    return [];
   }
 }

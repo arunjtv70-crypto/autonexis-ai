@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { IconSettings, IconLogout } from "./Icons";
 import "./UserMenuDropdown.css";
 
-export type SettingsTabId = "account";
+export type SettingsTabId = "account" | "personalization" | "memory" | "appearance" | "data";
 
 interface UserMenuDropdownProps {
   isOpen: boolean;
