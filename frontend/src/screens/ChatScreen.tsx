@@ -12,8 +12,9 @@ import { Logo } from "../components/Logo";
 import { SettingsModal } from "../components/SettingsModal";
 import { ProjectModal } from "../components/ProjectModal";
 import { PwaInstallModal } from "../components/PwaInstallModal";
-import { UserMenuDropdown, type SettingsTabId } from "../components/UserMenuDropdown";
+import { UserMenuDropdown, type SettingsTabId, type SettingsSubView } from "../components/UserMenuDropdown";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
+import { translate } from "../i18n/translations";
 import type { FirestoreProject } from "../db";
 import {
   isImageFile,
@@ -28,6 +29,7 @@ import {
   ImageCreationCard,
   VideoCreationCard,
   SpeechAudioButton,
+  speakTextWithPreferences,
 } from "../components/CreationCards";
 import {
   IconMenu,
@@ -67,12 +69,49 @@ interface IWindow extends Window {
   webkitSpeechRecognition?: any;
 }
 
+const VALID_SETTINGS_SECTIONS = new Set<SettingsTabId>([
+  "account",
+  "appearance",
+  "personalization",
+  "capabilities",
+  "notifications",
+  "privacy",
+  "wellbeing",
+  "customize",
+  "language",
+  "help",
+  "about",
+]);
+
+function parseSettingsPath(
+  pathname: string
+): { tab: SettingsTabId; subView: SettingsSubView } | null {
+  const clean = (pathname || "").replace(/\/+$/, "");
+  if (clean === "/settings") {
+    return { tab: "account", subView: "main" };
+  }
+  if (!clean.startsWith("/settings/")) return null;
+  const parts = clean.slice("/settings/".length).split("/").filter(Boolean);
+  const rawTab = parts[0] as SettingsTabId;
+  if (!VALID_SETTINGS_SECTIONS.has(rawTab)) return null;
+  const rawSub = (parts[1] || "main") as SettingsSubView;
+  const validSub: SettingsSubView =
+    rawSub === "terms" ||
+    rawSub === "privacy" ||
+    rawSub === "shortcuts" ||
+    rawSub === "support-resources"
+      ? rawSub
+      : "main";
+  return { tab: rawTab, subView: validSub };
+}
+
 export const ChatScreen: React.FC = () => {
   const {
     chats,
     activeChat,
     activeChatId,
     memory,
+    preferences,
     projects,
     activeProjectId,
     setActiveProjectId,
@@ -109,12 +148,18 @@ export const ChatScreen: React.FC = () => {
   const {
     isStandalone,
     isInstalled,
+    canPromptInstall,
     isInstallSupported,
     triggerInstall,
     shouldShowPostLoginBanner,
     dismissPostLoginBanner,
     markBannerShownNow,
   } = usePwa();
+
+  const t = (key: string) => translate(key, preferences.interfaceLanguage);
+
+  const initialRoute =
+    typeof window !== "undefined" ? parseSettingsPath(window.location.pathname) : null;
 
   // Input & UI States
   const [inputContent, setInputContent] = useState("");
@@ -123,10 +168,17 @@ export const ChatScreen: React.FC = () => {
   const [isSearchingMessages, setIsSearchingMessages] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("account");
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(!!initialRoute);
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(initialRoute?.tab || "account");
+  const [settingsSubView, setSettingsSubView] = useState<SettingsSubView>(
+    initialRoute?.subView || "main"
+  );
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Wellbeing break reminder tracking
+  const [showBreakReminder, setShowBreakReminder] = useState(false);
+  const activeSessionMsRef = useRef<number>(0);
 
   // Sidebar Pin / Archive / Chat Actions / Projects States
   const [showArchivedSection, setShowArchivedSection] = useState(false);
@@ -135,7 +187,6 @@ export const ChatScreen: React.FC = () => {
   const [renameInputVal, setRenameInputVal] = useState("");
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<FirestoreProject | null>(null);
-  const [showUnsupportedPwaHint, setShowUnsupportedPwaHint] = useState(false);
 
   // Feedback & Message Editing States
   const [feedbackPopoverMsgId, setFeedbackPopoverMsgId] = useState<string | null>(null);
@@ -176,10 +227,67 @@ export const ChatScreen: React.FC = () => {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Determine user display name: Firebase User account > fallback
+  // Determine user display name: preference override > Firebase User > fallback
   const userName =
+    preferences.displayName ||
     user?.display_name ||
     (user?.email ? user.email.split("@")[0].replace(/[._-]+/g, " ").trim() : (memory.userName || "User"));
+
+  const openSettingsAt = (tab: SettingsTabId = "account", subView: SettingsSubView = "main") => {
+    setSettingsTab(tab);
+    setSettingsSubView(subView);
+    setIsSettingsOpen(true);
+    setIsMobileMenuOpen(false);
+    setIsUserMenuOpen(false);
+    try {
+      const nextPath = `/settings/${tab}${subView !== "main" ? `/${subView}` : ""}`;
+      if (window.location.pathname !== nextPath) {
+        window.history.pushState(null, "", nextPath);
+      }
+    } catch {}
+  };
+
+  const closeSettings = () => {
+    setIsSettingsOpen(false);
+    try {
+      if (window.location.pathname.startsWith("/settings")) {
+        window.history.pushState(null, "", "/");
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    const onPopState = () => {
+      const parsed = parseSettingsPath(window.location.pathname);
+      if (parsed) {
+        setSettingsTab(parsed.tab);
+        setSettingsSubView(parsed.subView);
+        setIsSettingsOpen(true);
+      } else {
+        setIsSettingsOpen(false);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Wellbeing break reminder active timer (only counts while tab is visible)
+  useEffect(() => {
+    if (!preferences.breakReminderEnabled) {
+      activeSessionMsRef.current = 0;
+      setShowBreakReminder(false);
+      return;
+    }
+    const thresholdMs = (preferences.breakReminderMinutes || 60) * 60 * 1000;
+    const interval = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      activeSessionMsRef.current += 60_000;
+      if (activeSessionMsRef.current >= thresholdMs) {
+        setShowBreakReminder(true);
+      }
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [preferences.breakReminderEnabled, preferences.breakReminderMinutes]);
 
   const showInstallBanner = shouldShowPostLoginBanner(!!user && !isGuest, isGuest);
   useEffect(() => {
@@ -234,15 +342,32 @@ export const ChatScreen: React.FC = () => {
         }
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "," || e.key === "<")) {
         e.preventDefault();
-        setSettingsTab("account");
-        setIsSettingsOpen((prev) => !prev);
+        setIsSettingsOpen((prev) => {
+          if (prev) {
+            try {
+              if (window.location.pathname.startsWith("/settings")) {
+                window.history.pushState(null, "", "/");
+              }
+            } catch {}
+            return false;
+          }
+          setSettingsTab("account");
+          setSettingsSubView("main");
+          try {
+            if (window.location.pathname !== "/settings/account") {
+              window.history.pushState(null, "", "/settings/account");
+            }
+          } catch {}
+          return true;
+        });
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "O" || e.key === "o")) {
         e.preventDefault();
         createNewChat();
       } else if (e.key === "Escape") {
-        setIsSettingsOpen(false);
+        closeSettings();
         setIsProjectModalOpen(false);
         setIsMobileMenuOpen(false);
+        setIsUserMenuOpen(false);
         setOpenChatMenuId(null);
         setIsAttachmentMenuOpen(false);
         setIsHomeAttachmentMenuOpen(false);
@@ -265,7 +390,7 @@ export const ChatScreen: React.FC = () => {
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = false;
-      recognition.lang = "en-IN"; // Default English/Hindi friendly
+      recognition.lang = preferences.micLanguage || "en-IN";
 
       recognition.onstart = () => {
         setIsListening(true);
@@ -289,7 +414,14 @@ export const ChatScreen: React.FC = () => {
 
       recognitionRef.current = recognition;
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep speech recognition language synced with user preferences
+  useEffect(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = preferences.micLanguage || "en-IN";
+    }
+  }, [preferences.micLanguage]);
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
@@ -301,6 +433,7 @@ export const ChatScreen: React.FC = () => {
       setIsListening(false);
     } else {
       try {
+        recognitionRef.current.lang = preferences.micLanguage || "en-IN";
         recognitionRef.current.start();
       } catch {
         recognitionRef.current.stop();
@@ -313,20 +446,13 @@ export const ChatScreen: React.FC = () => {
     if (!autoSpeak || !activeChat || activeChat.messages.length === 0) return;
     const lastMsg = activeChat.messages[activeChat.messages.length - 1];
     if (lastMsg.role === "assistant" && lastMsg.content && !isSending) {
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-        const clean = lastMsg.content.replace(/[*#`_~[\]()]/g, "").slice(0, 400);
-        const utter = new SpeechSynthesisUtterance(clean);
-        const voices = window.speechSynthesis.getVoices();
-        const targetVoice =
-          voices.find((v) => v.lang.startsWith("hi")) ||
-          voices.find((v) => v.lang.startsWith("en-IN")) ||
-          voices.find((v) => v.lang.startsWith("en"));
-        if (targetVoice) utter.voice = targetVoice;
-        window.speechSynthesis.speak(utter);
-      }
+      speakTextWithPreferences(lastMsg.content.slice(0, 400), {
+        voiceName: preferences.voiceName,
+        voiceSpeed: preferences.voiceSpeed,
+        voiceLanguage: preferences.voiceLanguage,
+      });
     }
-  }, [activeChat?.messages.length, isSending, autoSpeak]);
+  }, [activeChat?.messages.length, isSending, autoSpeak, preferences.voiceName, preferences.voiceSpeed, preferences.voiceLanguage]);
 
   // Track scroll position to know when user intentionally scrolled up
   const handleScroll = () => {
@@ -350,8 +476,9 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  // Auto-scroll on incoming stream updates (instant scrollTop update, no layout fighting)
+  // Auto-scroll on incoming stream updates (respects autoScroll preference)
   useEffect(() => {
+    if (preferences.autoScroll === false) return;
     if (!userScrolledUpRef.current && chatScrollRef.current) {
       requestAnimationFrame(() => {
         if (chatScrollRef.current && !userScrolledUpRef.current) {
@@ -359,7 +486,7 @@ export const ChatScreen: React.FC = () => {
         }
       });
     }
-  }, [activeChat?.messages, isSending]);
+  }, [activeChat?.messages, isSending, preferences.autoScroll]);
 
   // Auto grow textarea height
   useEffect(() => {
@@ -418,9 +545,17 @@ export const ChatScreen: React.FC = () => {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    const enterSends = preferences.enterToSend !== false;
+    if (enterSends) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    } else {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        handleSend();
+      }
     }
   };
 
@@ -695,7 +830,7 @@ export const ChatScreen: React.FC = () => {
         >
           <div className="sidebar-nav-btn-left">
             <IconPlus size={16} />
-            <span>New Chat</span>
+            <span>{t("newChat")}</span>
           </div>
           <span className="sidebar-nav-shortcut">Ctrl+Shift+O</span>
         </button>
@@ -711,21 +846,18 @@ export const ChatScreen: React.FC = () => {
         >
           <div className="sidebar-nav-btn-left">
             <IconShield size={16} />
-            <span>Temporary Chat</span>
+            <span>{t("temporaryChat")}</span>
           </div>
         </button>
 
         <button
           type="button"
           className="sidebar-nav-btn"
-          onClick={() => {
-            setSettingsTab("account");
-            setIsSettingsOpen(true);
-          }}
+          onClick={() => openSettingsAt("account", "main")}
         >
           <div className="sidebar-nav-btn-left">
             <IconSettings size={15} />
-            <span>Settings</span>
+            <span>{t("settings")}</span>
           </div>
         </button>
       </div>
@@ -736,7 +868,7 @@ export const ChatScreen: React.FC = () => {
         <input
           ref={searchInputRef}
           type="text"
-          placeholder="Search chats & messages (Ctrl+K)"
+          placeholder={t("searchChats")}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           onKeyDown={handleSearchEnter}
@@ -862,19 +994,19 @@ export const ChatScreen: React.FC = () => {
         {pinnedChats.length > 0 && (
           <>
             <div className="sidebar-recents-header">
-              <span>Pinned</span>
+              <span>{t("pinned")}</span>
             </div>
             {pinnedChats.map(renderChatRow)}
           </>
         )}
 
         <div className="sidebar-recents-header">
-          <span>Recents</span>
+          <span>{t("recents")}</span>
         </div>
 
         {recentChats.length === 0 && pinnedChats.length === 0 ? (
           <div className="empty-chat-list">
-            <span>No conversations found</span>
+            <span>{t("noConversations")}</span>
           </div>
         ) : (
           recentChats.map(renderChatRow)
@@ -897,7 +1029,7 @@ export const ChatScreen: React.FC = () => {
               cursor: "pointer",
             }}
           >
-            Load more chats
+            {t("loadMoreChats")}
           </button>
         )}
 
@@ -911,7 +1043,7 @@ export const ChatScreen: React.FC = () => {
             >
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                 <IconArchive size={13} />
-                <span>Archived ({archivedChats.length})</span>
+                <span>{t("archived")} ({archivedChats.length})</span>
               </div>
               <IconChevronDown
                 size={13}
@@ -923,40 +1055,21 @@ export const ChatScreen: React.FC = () => {
         )}
       </div>
 
-      {/* Bottom Install App Button + User Profile */}
+      {/* Bottom User Profile & Account Menu Trigger */}
       <div className="sidebar-bottom">
-        {!isStandalone && !isInstalled && (
-          <div className="sidebar-install-wrap">
-            {isInstallSupported ? (
-              <button
-                type="button"
-                className="sidebar-install-btn"
-                onClick={() => triggerInstall()}
-              >
-                <IconSmartphone size={14} />
-                <span>Install AUTONEXIS Assistant</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="sidebar-install-btn muted"
-                onClick={() => setShowUnsupportedPwaHint((prev) => !prev)}
-              >
-                <IconSmartphone size={14} />
-                <span>Install AUTONEXIS Assistant</span>
-              </button>
-            )}
-            {showUnsupportedPwaHint && !isInstallSupported && (
-              <div className="sidebar-install-hint">
-                Open this site in Chrome or Safari to install it
-              </div>
-            )}
-          </div>
-        )}
-
         <div
+          role="button"
+          tabIndex={0}
+          aria-haspopup="menu"
+          aria-expanded={isUserMenuOpen}
           className="user-profile-pill"
           onClick={() => setIsUserMenuOpen((prev) => !prev)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setIsUserMenuOpen((prev) => !prev);
+            }
+          }}
           title="Account Menu"
         >
           <div className="user-profile-left">
@@ -968,7 +1081,8 @@ export const ChatScreen: React.FC = () => {
               />
             </div>
             <span className="user-name-text">
-              {userName} · Free
+              {userName}
+              {isGuest ? ` · ${t("guestMode")}` : ""}
             </span>
           </div>
           <IconChevronDown size={14} style={{ opacity: 0.7 }} />
@@ -977,11 +1091,12 @@ export const ChatScreen: React.FC = () => {
         <UserMenuDropdown
           isOpen={isUserMenuOpen}
           onClose={() => setIsUserMenuOpen(false)}
-          userEmail={user?.email || "Account"}
-          onOpenSettings={(tab) => {
-            setSettingsTab(tab || "account");
-            setIsSettingsOpen(true);
-          }}
+          userName={userName}
+          userEmail={user?.email || (isGuest ? "Guest session" : "Signed in")}
+          interfaceLanguage={preferences.interfaceLanguage || "English"}
+          showInstallOption={!isStandalone && !isInstalled && (isInstallSupported || canPromptInstall)}
+          onInstallPwa={() => triggerInstall()}
+          onOpenSettings={(tab, sub) => openSettingsAt(tab || "account", sub || "main")}
           onLogout={logout}
         />
       </div>
@@ -1051,7 +1166,7 @@ export const ChatScreen: React.FC = () => {
                 className="topbar-signin-pill"
                 onClick={() => setIsAuthScreenVisible(true)}
               >
-                Sign In
+                {t("signIn")}
               </button>
             )}
 
@@ -1059,12 +1174,9 @@ export const ChatScreen: React.FC = () => {
             <button
               type="button"
               className="topbar-action-btn"
-              onClick={() => {
-                setSettingsTab("account");
-                setIsSettingsOpen(true);
-              }}
-              aria-label="Settings"
-              title="Settings (Ctrl+Shift+,)"
+              onClick={() => openSettingsAt("account", "main")}
+              aria-label={t("settings")}
+              title={`${t("settings")} (Ctrl+Shift+,)`}
             >
               <IconSettings size={18} />
             </button>
@@ -1076,15 +1188,41 @@ export const ChatScreen: React.FC = () => {
           <div className="temporary-chat-banner" role="alert">
             <div className="temporary-chat-banner-left">
               <IconShield size={15} />
-              <span>Temporary Chat active · Messages are not saved to history and memories are paused.</span>
+              <span>{t("tempBannerText")}</span>
             </div>
             <button
               type="button"
               className="temporary-chat-exit-btn"
               onClick={exitTemporaryChat}
             >
-              Exit
+              {t("exit")}
             </button>
+          </div>
+        )}
+
+        {/* Calm Dismissible Wellbeing Break Reminder Pill */}
+        {showBreakReminder && (
+          <div className="wellbeing-break-pill" role="status">
+            <span>{t("breakReminderText")}</span>
+            <div className="wellbeing-break-actions">
+              <button
+                type="button"
+                className="wellbeing-break-link"
+                onClick={() => openSettingsAt("wellbeing", "main")}
+              >
+                {t("secWellbeing")}
+              </button>
+              <button
+                type="button"
+                className="wellbeing-break-dismiss"
+                onClick={() => {
+                  activeSessionMsRef.current = 0;
+                  setShowBreakReminder(false);
+                }}
+              >
+                {t("dismiss")}
+              </button>
+            </div>
           </div>
         )}
 
@@ -1177,7 +1315,7 @@ export const ChatScreen: React.FC = () => {
                   className="home-orbital-icon"
                 />
                 <h1 className="home-greeting-title">
-                  Back at it, {userName}
+                  {t("backAtIt")}, {userName}
                 </h1>
               </div>
 
@@ -1210,7 +1348,9 @@ export const ChatScreen: React.FC = () => {
                       ? "Describe the visual you want to create with AUTONEXIS Image Studio..."
                       : inputMode === "video"
                       ? "Describe the cinematic scene for AUTONEXIS Video Studio..."
-                      : "How can I help you today?"
+                      : preferences.enterToSend === false
+                      ? t("askAnythingCtrlEnter")
+                      : t("howCanIHelp")
                   }
                   className="chat-input-textarea"
                 />
@@ -1450,79 +1590,81 @@ export const ChatScreen: React.FC = () => {
 
               {/* Engine Badge */}
               <div className="home-engine-tag">
-                AUTONEXIS Nexus-1 • Ultra • Fast • Multi-Modal
+                {t("engineTag")}
               </div>
 
-              {/* Recent Artifacts & Creations Section */}
-              <div className="home-artifacts-section">
-                <div className="artifacts-header">
-                  <span className="artifacts-title">Recent creations & studio presets</span>
-                  <button
-                    type="button"
-                    className="artifacts-view-all"
-                    onClick={() => {
-                      setInputMode("image");
-                      setInputContent("A futuristic hyper-detailed cosmic portal in 8K");
-                    }}
-                  >
-                    View all
-                  </button>
-                </div>
-
-                <div className="artifacts-grid">
-                  {/* Artifact Card 1: Image Studio Preset */}
-                  <div
-                    className="artifact-card"
-                    onClick={() => {
-                      setInputMode("image");
-                      setInputContent("Hyper-realistic futuristic neon car speeding on a cyberpunk highway at rain night");
-                    }}
-                  >
-                    <div className="artifact-card-preview">
-                      <img
-                        src="https://image.pollinations.ai/prompt/cyberpunk%20neon%20car%20night%20highway?width=300&height=180&nologo=true"
-                        alt="Cyberpunk"
-                        className="artifact-img-preview"
-                      />
-                    </div>
-                    <div className="artifact-card-title">Cyberpunk Speed Machine</div>
-                    <div className="artifact-card-time">Image Studio • 1024×768 HD</div>
+              {/* Recent Artifacts & Starter Creations Section */}
+              {preferences.showStarterPrompts !== false && (
+                <div className="home-artifacts-section">
+                  <div className="artifacts-header">
+                    <span className="artifacts-title">{t("recentCreations")}</span>
+                    <button
+                      type="button"
+                      className="artifacts-view-all"
+                      onClick={() => {
+                        setInputMode("image");
+                        setInputContent("A futuristic hyper-detailed cosmic portal in 8K");
+                      }}
+                    >
+                      {t("viewAll")}
+                    </button>
                   </div>
 
-                  {/* Artifact Card 2: Video Studio Preset */}
-                  <div
-                    className="artifact-card"
-                    onClick={() => {
-                      setInputMode("video");
-                      setInputContent("Cinematic glowing purple gravitational singularity particle vortex");
-                    }}
-                  >
-                    <div className="artifact-card-preview" style={{ background: "radial-gradient(circle, #581c87 0%, #0c0c0e 80%)" }}>
-                      <IconVideo size={28} style={{ color: "#c084fc", opacity: 0.9 }} />
-                    </div>
-                    <div className="artifact-card-title">Orbital Singularity Loop</div>
-                    <div className="artifact-card-time">Video Studio • 4K 60FPS</div>
-                  </div>
-
-                  {/* Artifact Card 3: Memory & Assistant Prompt */}
-                  <div
-                    className="artifact-card"
-                    onClick={() => {
-                      setInputMode("chat");
-                      setInputContent("Give me a strategic overview of our autonomous AI capabilities and project roadmap");
-                    }}
-                  >
-                    <div className="artifact-card-preview">
-                      <div className="artifact-doc-preview">
-                        <strong>AUTONEXIS Assistant</strong>
-                        <p>Self-learning, cross-chat persistent memory, native speech synthesis and studio multi-modal rendering engine.</p>
+                  <div className="artifacts-grid">
+                    {/* Artifact Card 1: Image Studio Preset */}
+                    <div
+                      className="artifact-card"
+                      onClick={() => {
+                        setInputMode("image");
+                        setInputContent("Hyper-realistic futuristic neon car speeding on a cyberpunk highway at rain night");
+                      }}
+                    >
+                      <div className="artifact-card-preview">
+                        <img
+                          src="https://image.pollinations.ai/prompt/cyberpunk%20neon%20car%20night%20highway?width=300&height=180&nologo=true"
+                          alt="Cyberpunk"
+                          className="artifact-img-preview"
+                        />
                       </div>
+                      <div className="artifact-card-title">Cyberpunk Speed Machine</div>
+                      <div className="artifact-card-time">Image Studio • 1024×768 HD</div>
                     </div>
-                    <div className="artifact-card-title">System Architecture Overview</div>
-                    <div className="artifact-card-time">Prompt & Knowledge • Just now</div>
+
+                    {/* Artifact Card 2: Video Studio Preset */}
+                    <div
+                      className="artifact-card"
+                      onClick={() => {
+                        setInputMode("video");
+                        setInputContent("Cinematic glowing purple gravitational singularity particle vortex");
+                      }}
+                    >
+                      <div className="artifact-card-preview" style={{ background: "radial-gradient(circle, #581c87 0%, #0c0c0e 80%)" }}>
+                        <IconVideo size={28} style={{ color: "#c084fc", opacity: 0.9 }} />
+                      </div>
+                      <div className="artifact-card-title">Orbital Singularity Loop</div>
+                      <div className="artifact-card-time">Video Studio • 4K 60FPS</div>
+                    </div>
+
+                    {/* Artifact Card 3: Memory & Assistant Prompt */}
+                    <div
+                      className="artifact-card"
+                      onClick={() => {
+                        setInputMode("chat");
+                        setInputContent("Give me a strategic overview of our autonomous AI capabilities and project roadmap");
+                      }}
+                    >
+                      <div className="artifact-card-preview">
+                        <div className="artifact-doc-preview">
+                          <strong>AUTONEXIS Assistant</strong>
+                          <p>Self-learning, cross-chat persistent memory, native speech synthesis and studio multi-modal rendering engine.</p>
+                        </div>
+                      </div>
+                      <div className="artifact-card-title">System Architecture Overview</div>
+                      <div className="artifact-card-time">Prompt & Knowledge • Just now</div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           ) : (
             /* ==============================================================
@@ -1703,7 +1845,12 @@ export const ChatScreen: React.FC = () => {
                                   )}
                                 </button>
 
-                                <SpeechAudioButton text={msg.content} />
+                                <SpeechAudioButton
+                                  text={msg.content}
+                                  voiceName={preferences.voiceName}
+                                  voiceSpeed={preferences.voiceSpeed}
+                                  voiceLanguage={preferences.voiceLanguage}
+                                />
 
                                 {!isGuest && (
                                   <>
@@ -1908,7 +2055,9 @@ export const ChatScreen: React.FC = () => {
                     ? "Create an image with AUTONEXIS Image Studio..."
                     : inputMode === "video"
                     ? "Render a cinematic scene with Video Studio..."
-                    : "Ask AUTONEXIS Assistant anything... (Enter to send)"
+                    : preferences.enterToSend === false
+                    ? t("askAnythingCtrlEnter")
+                    : t("askAnythingEnter")
                 }
                 className="chat-input-textarea"
               />
@@ -2138,7 +2287,7 @@ export const ChatScreen: React.FC = () => {
                     disabled={(!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile}
                     onClick={handleSend}
                     aria-label="Send message"
-                    title="Send (Enter)"
+                    title={preferences.enterToSend === false ? "Send (Ctrl+Enter)" : "Send (Enter)"}
                   >
                     <IconSend size={15} />
                   </button>
@@ -2152,8 +2301,10 @@ export const ChatScreen: React.FC = () => {
       {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={closeSettings}
         initialTab={settingsTab}
+        initialSubView={settingsSubView}
+        onTabChange={(tab, sub) => openSettingsAt(tab, sub || "main")}
       />
 
       {/* Project Management Modal */}

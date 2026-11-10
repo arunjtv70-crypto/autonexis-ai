@@ -6,6 +6,8 @@
 
 export const APP_NAME = "AUTONEXIS Assistant";
 export const APP_SHORT_NAME = "AUTONEXIS";
+export const APP_VERSION = "v2.5.0";
+export const SUPPORT_EMAIL = "";
 
 // Base URL from environment or relative /api for unified single-origin serving
 export const API_BASE_URL = (

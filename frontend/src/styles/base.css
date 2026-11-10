@@ -87,3 +87,30 @@ html[data-text-size="large"] {
   font-size: 18px;
 }
 
+/* Density Variations */
+html[data-density="compact"] .message-list {
+  gap: 0.75rem;
+}
+
+html[data-density="compact"] .message-bubble-box {
+  padding: 0.55rem 0.85rem;
+}
+
+html[data-density="compact"] .chat-list-item {
+  padding: 0.35rem 0.65rem;
+}
+
+html[data-density="compact"] .sidebar-nav-btn {
+  padding: 0.38rem 0.65rem;
+}
+
+/* Reduce Motion Support */
+html[data-reduce-motion="true"] *,
+html[data-reduce-motion="true"] *::before,
+html[data-reduce-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+

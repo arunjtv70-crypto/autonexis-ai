@@ -60,6 +60,11 @@ class DirectChatRequest(BaseModel):
     user_memory: Optional[str] = None
     user_context: Optional[Dict[str, Any]] = None
     project_context: Optional[Dict[str, Any]] = None
+    relevant_past_chats: Optional[List[Dict[str, Any]]] = None
+    custom_style: Optional[Dict[str, Any]] = None
+
+class StyleCreateRequest(BaseModel):
+    sample: str = Field(..., min_length=10, max_length=2000)
 
 class MemoryExtractMessage(BaseModel):
     role: str
@@ -79,6 +84,22 @@ class MemoryExtractRequest(BaseModel):
 GUEST_IP_REQUESTS: Dict[str, List[float]] = {}
 GUEST_RATE_LIMIT_WINDOW = 3600.0  # 1 hour
 GUEST_RATE_LIMIT_MAX = 30         # Max 30 requests per hour per IP
+
+STYLE_USER_REQUESTS: Dict[str, List[float]] = {}
+STYLE_RATE_LIMIT_WINDOW = 3600.0
+STYLE_RATE_LIMIT_MAX = 15
+
+def check_style_rate_limit(uid: str) -> None:
+    now = time.time()
+    timestamps = STYLE_USER_REQUESTS.get(uid, [])
+    timestamps = [t for t in timestamps if now - t < STYLE_RATE_LIMIT_WINDOW]
+    if len(timestamps) >= STYLE_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many custom style requests. Please wait a bit before creating another style."
+        )
+    timestamps.append(now)
+    STYLE_USER_REQUESTS[uid] = timestamps
 
 def check_guest_rate_limit(client_ip: str) -> None:
     now = time.time()
@@ -150,6 +171,8 @@ async def chat_direct(
         req.user_memory,
         user_context=req.user_context,
         project_context=req.project_context,
+        relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+        custom_style=req.custom_style if not is_guest else None,
         is_guest=is_guest
     )
     return result
@@ -202,6 +225,8 @@ async def chat_stream_endpoint(
             req.user_memory,
             user_context=req.user_context,
             project_context=req.project_context,
+            relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+            custom_style=req.custom_style if not is_guest else None,
             is_guest=is_guest
         ),
         media_type="text/event-stream",
@@ -225,6 +250,22 @@ async def extract_memory_endpoint(
     messages_payload = [m.model_dump() for m in req.messages]
     existing_payload = [m.model_dump() for m in (req.existing_memories or [])]
     return await llm_client.extract_memories(messages_payload, existing_payload)
+
+@app.post("/api/style/create")
+@app.post("/style/create")
+async def create_custom_style_endpoint(
+    req: StyleCreateRequest,
+    request: Request,
+    auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Analyzes a pasted writing sample (<= 2000 chars) and returns a <= 300 char writing style description.
+    Requires authenticated Firebase token and enforces per-user rate limit.
+    """
+    current_user = await get_current_user(request, auth, db)
+    check_style_rate_limit(current_user.id)
+    return await llm_client.analyze_writing_style(req.sample)
 
 # -------------------------------------------------------------
 # UNIFIED FRONTEND SERVING (SINGLE WORKING LINK: http://localhost:8000)

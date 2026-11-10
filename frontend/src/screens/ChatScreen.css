@@ -1854,6 +1854,47 @@
   gap: 8px;
 }
 
+/* Wellbeing Break Reminder Pill */
+.wellbeing-break-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 14px;
+  background-color: rgba(200, 169, 126, 0.12);
+  border-bottom: 1px solid rgba(200, 169, 126, 0.28);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.wellbeing-break-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wellbeing-break-link,
+.wellbeing-break-dismiss {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.wellbeing-break-link {
+  color: var(--accent);
+  border-color: rgba(200, 169, 126, 0.4);
+}
+
+.wellbeing-break-dismiss:hover,
+.wellbeing-break-link:hover {
+  border-color: var(--accent);
+}
+
 /* Responsive (verified down to 360px mobile width) */
 @media (max-width: 768px) {
   .desktop-sidebar {

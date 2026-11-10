@@ -3,9 +3,11 @@ import {
   postChatMessage,
   streamChatMessage,
   extractMemoriesApi,
+  createCustomStyleApi,
   type ChatMessagePayload,
   type MultimodalPart,
 } from "../api/client";
+import { APP_VERSION } from "../config";
 import { useAuth } from "./auth";
 import {
   loadChatList,
@@ -31,9 +33,12 @@ import {
   deleteProjectAndUnlinkChats,
   saveMessageFeedback,
   loadChatFeedback,
+  saveProblemReport,
+  DEFAULT_USER_PREFERENCES,
   type FirestoreChatMeta,
   type FirestoreMessage,
   type UserPreferences,
+  type CustomStyleItem,
   type FirestoreMemoryItem,
   type FirestoreProject,
   type FirestoreProjectFile,
@@ -155,6 +160,23 @@ export interface ChatsContextType {
   resetMemory: () => void;
   updateCallName: (name: string) => void;
   updatePreferences: (updates: Partial<UserPreferences>) => Promise<void>;
+  flushPreferencesNow: () => Promise<void>;
+  prefSaveStatus: "idle" | "saving" | "saved";
+  createCustomStyle: (
+    name: string,
+    sample: string
+  ) => Promise<{ ok: boolean; error?: string; style?: CustomStyleItem }>;
+  updateCustomStyle: (
+    id: string,
+    updates: { name?: string; description?: string }
+  ) => Promise<void>;
+  deleteCustomStyle: (id: string) => Promise<void>;
+  setActiveCustomStyle: (id: string | null) => Promise<void>;
+  submitProblemReport: (
+    category: string,
+    message: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+  clearLocalDeviceData: () => void;
   addMemoryManual: (text: string) => Promise<void>;
   editMemory: (id: string, text: string) => Promise<void>;
   deleteMemory: (id: string) => Promise<void>;
@@ -293,37 +315,139 @@ function extractAllFactsFromChats(allChats: ChatItem[]): string[] {
   return Array.from(factsSet);
 }
 
-// Function to build rich cross-chat memory and summaries
-function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | null): string {
-  const pastChats = allChats.filter((c) => c.id !== currentId && c.messages && c.messages.length > 0);
-  if (pastChats.length === 0) return "";
+// Apply visual & behavior preferences as HTML data-attributes
+function applyPreferenceDomAttributes(prefs: UserPreferences): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.setAttribute("data-text-size", (prefs.textSize || "Medium").toLowerCase());
+  root.setAttribute("data-density", (prefs.density || "Comfortable").toLowerCase());
+  root.setAttribute("data-reduce-motion", prefs.reduceMotion ? "true" : "false");
+  root.setAttribute("data-code-wrap", prefs.codeBlockWrap || "scroll");
+}
 
-  const sections: string[] = [];
-  sections.push("[CROSS-CHAT MEMORY - PREVIOUS CONVERSATIONS WITH THIS USER]:");
-  sections.push("Below is what the user talked about in their other previous chats. You MUST remember these facts, topics, and discussions if the user asks about them or refers to past chats:\n");
+// Gentle Web Audio chime when background reply completes (if enabled)
+function playQuietCompletionChime(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now);
+    osc.frequency.setValueAtTime(783.99, now + 0.09);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.055, now + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+    osc.onended = () => {
+      try {
+        ctx.close();
+      } catch {}
+    };
+  } catch {
+    // Ignore autoplay/WebAudio restrictions
+  }
+}
 
-  const recentPast = pastChats.slice(0, 6);
+const PAST_CHAT_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "what", "when", "where",
+  "how", "why", "who", "you", "your", "are", "was", "were", "have", "has",
+  "had", "will", "would", "can", "could", "should", "about", "into", "kya",
+  "hai", "hain", "kar", "karo", "mera", "meri", "mere", "tum", "aap", "batao",
+  "kaise", "nahi", "bhai", "yaar", "please", "help", "tell",
+]);
 
-  recentPast.forEach((pc, idx) => {
-    const userMessages = pc.messages.filter((m) => m.role === "user").map((m) => m.content);
-    const assistantMessages = pc.messages.filter((m) => m.role === "assistant").map((m) => m.content);
-    const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : "";
+// Pick up to 3 keyword-matched recent snippets from loaded past chats (<= 1200 chars total)
+function selectRelevantPastChats(
+  allChats: ChatItem[],
+  currentId: string | null,
+  query: string
+): Array<{ title: string; snippet: string }> {
+  const candidates = allChats.filter(
+    (c) =>
+      c.id !== currentId &&
+      !c._isTemporary &&
+      !c.archived &&
+      c.messages &&
+      c.messages.length > 0
+  );
+  if (candidates.length === 0) return [];
 
-    sections.push(`--- Past Chat #${idx + 1}: "${pc.title}" ---`);
-    if (userMessages.length > 0) {
-      sections.push(`User said: ${userMessages.map((m) => `"${m}"`).join(" -> ")}`);
+  const keywords = (query || "")
+    .toLowerCase()
+    .split(/[^a-z0-9\u0900-\u097F]+/)
+    .filter((w) => w.length >= 3 && !PAST_CHAT_STOPWORDS.has(w))
+    .slice(0, 12);
+
+  const asksAboutHistory =
+    /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation)|do\s+you\s+remember|kya\s+yaad\s+hai/i.test(
+      query || ""
+    );
+
+  const scored = candidates.map((chat, recencyIdx) => {
+    const titleLower = (chat.title || "").toLowerCase();
+    const recentMsgs = chat.messages.slice(-8);
+    const combinedText = recentMsgs
+      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.content || "").replace(/\s+/g, " ").trim()}`)
+      .join(" | ");
+    const combinedLower = combinedText.toLowerCase();
+
+    let matchScore = 0;
+    let firstHitPos = -1;
+    for (const kw of keywords) {
+      if (titleLower.includes(kw)) matchScore += 4;
+      const pos = combinedLower.indexOf(kw);
+      if (pos !== -1) {
+        matchScore += 3;
+        if (firstHitPos === -1 || pos < firstHitPos) firstHitPos = pos;
+      }
     }
-    if (lastAssistant) {
-      const truncated = lastAssistant.length > 200 ? lastAssistant.slice(0, 200) + "..." : lastAssistant;
-      sections.push(`Assistant replied: "${truncated.replace(/\n+/g, " ")}"`);
-    }
+
+    return { chat, combinedText, matchScore, firstHitPos, recencyIdx };
   });
 
-  sections.push("\nINSTRUCTION FOR CROSS-CHAT MEMORY:");
-  sections.push("1. When the user asks 'humne pehle kya baat ki thi?', 'pichli chat me maine kya bola tha?', 'tujhe yaad hai?', or refers to an earlier conversation, ALWAYS use the above past chats to answer accurately and with personal detail.");
-  sections.push("2. NEVER say 'I don't remember past chats' or 'Each chat is separate'. In AUTONEXIS Assistant, you have active continuous memory across all chats!");
+  let chosen = scored.filter((item) => item.matchScore > 0);
+  if (chosen.length === 0) {
+    if (!asksAboutHistory) {
+      // No keyword match -> send nothing unless user asks about past conversations
+      return [];
+    }
+    chosen = scored.slice(0, 3);
+  } else {
+    chosen.sort((a, b) => b.matchScore - a.matchScore || a.recencyIdx - b.recencyIdx);
+    chosen = chosen.slice(0, 3);
+  }
 
-  return sections.join("\n");
+  const MAX_TOTAL_CHARS = 1200;
+  let usedChars = 0;
+  const output: Array<{ title: string; snippet: string }> = [];
+
+  for (const item of chosen) {
+    if (usedChars >= MAX_TOTAL_CHARS - 60) break;
+    const budget = Math.min(380, MAX_TOTAL_CHARS - usedChars);
+    const raw = item.combinedText;
+    if (!raw) continue;
+
+    let snippet = "";
+    if (item.firstHitPos > 140 && raw.length > budget) {
+      const start = Math.max(0, item.firstHitPos - 90);
+      snippet = (start > 0 ? "..." : "") + raw.slice(start, start + budget - 3);
+    } else {
+      snippet = raw.length > budget ? raw.slice(0, budget - 3) + "..." : raw;
+    }
+
+    const title = (item.chat.title || "Past Chat").slice(0, 70);
+    usedChars += title.length + snippet.length;
+    output.push({ title, snippet });
+  }
+
+  return output;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +559,21 @@ function selectRelevantProjectContext(
 // Provider
 // ---------------------------------------------------------------------------
 
+const GUEST_PREFS_KEY = "autonexis:guest:prefs";
+
+function createTempChatItem(): ChatItem {
+  return {
+    id: "temp-" + Date.now(),
+    title: "Temporary Chat",
+    updated_at: new Date().toISOString(),
+    messages: [],
+    _messagesLoaded: true,
+    _isTemporary: true,
+  };
+}
+
 export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, isGuest, updateProfileName } = useAuth();
+  const { user, isGuest, updateProfileName, logout } = useAuth();
   const currentUid = user?.id || (isGuest ? "guest" : null);
   const isAuthenticated = !!user?.id && !isGuest;
 
@@ -460,15 +597,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return loadStoredMemory(currentUid, defName);
   });
 
-  // Settings / Preferences state
-  const [preferences, setPreferences] = useState<UserPreferences>({
-    memoryEnabled: true,
-    webSearchDefault: false,
-    theme: "auto",
-    textSize: "Medium",
-    responseStyle: "Default",
-    language: "Auto",
-  });
+  // Settings / Preferences state & debounced Firestore persistence
+  const [preferences, setPreferences] = useState<UserPreferences>(() => ({
+    ...DEFAULT_USER_PREFERENCES,
+  }));
+  const preferencesRef = useRef<UserPreferences>(preferences);
+  useEffect(() => {
+    preferencesRef.current = preferences;
+  }, [preferences]);
+  const [prefSaveStatus, setPrefSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const pendingPrefUpdatesRef = useRef<Partial<UserPreferences>>({});
+  const prefSaveTimerRef = useRef<number | null>(null);
+  const prefSavedResetTimerRef = useRef<number | null>(null);
 
   // Stored memories state
   const [memories, setMemories] = useState<FirestoreMemoryItem[]>([]);
@@ -538,9 +678,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       lastDocRef.current = result.lastDoc;
       setHasMoreChats(result.chats.length === 50);
       if (chatItems.length === 0) {
-        const fresh = createEmptyChat();
-        setChats([fresh]);
-        setActiveChatId(fresh.id);
+        if (preferencesRef.current.defaultTemporaryChat) {
+          const tempFresh = createTempChatItem();
+          setIsTemporaryChat(true);
+          setChats([tempFresh]);
+          setActiveChatId(tempFresh.id);
+        } else {
+          const fresh = createEmptyChat();
+          setIsTemporaryChat(false);
+          setChats([fresh]);
+          setActiveChatId(fresh.id);
+        }
       } else {
         const defaultActive = chatItems.find((c) => !c.archived) || chatItems[0];
         setChats(chatItems);
@@ -643,33 +791,62 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Load preferences, memories, and projects from Firestore
   // -----------------------------------------------------------------------
   const loadPreferencesAndMemories = useCallback(async (uid: string) => {
+    if (prefSaveTimerRef.current !== null) {
+      window.clearTimeout(prefSaveTimerRef.current);
+      prefSaveTimerRef.current = null;
+    }
+    pendingPrefUpdatesRef.current = {};
+    setPrefSaveStatus("idle");
+
     if (!uid || uid === "guest") {
       setMemories([]);
       setProjects([]);
       setActiveProjectId(null);
       setProjectFilesMap({});
       setFeedbackByMessage({});
-      setPreferences({
-        memoryEnabled: true,
-        webSearchDefault: false,
-        theme: "auto",
-        textSize: "Medium",
-        responseStyle: "Default",
-        language: "Auto",
-      });
+
+      let nextPrefs: UserPreferences = { ...DEFAULT_USER_PREFERENCES };
+      if (uid === "guest") {
+        try {
+          const raw = localStorage.getItem(GUEST_PREFS_KEY);
+          if (raw) {
+            nextPrefs = { ...DEFAULT_USER_PREFERENCES, ...JSON.parse(raw) };
+          }
+        } catch {}
+      }
+      setPreferences(nextPrefs);
+      preferencesRef.current = nextPrefs;
+      setIsWebSearchActive(!!nextPrefs.webSearchDefault);
+      applyPreferenceDomAttributes(nextPrefs);
+      if (uid === "guest" && nextPrefs.theme && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("autonexis:sync-theme", { detail: nextPrefs.theme }));
+      }
       return;
     }
     try {
       const prefs = await loadUserPreferences(uid);
-      if (prefs) {
-        setPreferences((prev) => ({ ...prev, ...prefs }));
-        setIsWebSearchActive(!!prefs.webSearchDefault);
-        if (prefs.textSize && typeof document !== "undefined") {
-          document.documentElement.setAttribute("data-text-size", prefs.textSize.toLowerCase());
-        }
+      const merged: UserPreferences = { ...DEFAULT_USER_PREFERENCES, ...(prefs || {}) };
+      setPreferences(merged);
+      preferencesRef.current = merged;
+      setIsWebSearchActive(!!merged.webSearchDefault);
+      applyPreferenceDomAttributes(merged);
+      if (prefs?.theme && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("autonexis:sync-theme", { detail: prefs.theme }));
+      }
+      if (merged.defaultTemporaryChat) {
+        setChats((prev) => {
+          if (prev.length === 1 && !prev[0]._isTemporary && prev[0].messages.length === 0 && prev[0].title === "New Chat") {
+            const tempFresh = createTempChatItem();
+            setIsTemporaryChat(true);
+            setActiveChatId(tempFresh.id);
+            return [tempFresh];
+          }
+          return prev;
+        });
       }
     } catch (err) {
       console.warn("[AUTONEXIS] Failed to load user preferences:", err);
+      setFirestoreError("Couldn't load saved settings right now.");
     }
     try {
       const mems = await loadUserMemories(uid);
@@ -854,9 +1031,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // -----------------------------------------------------------------------
 
   const createNewChat = (projectId?: string | null): string => {
+    const resolvedProjectId = projectId ?? activeProjectId ?? null;
+    if (!resolvedProjectId && preferencesRef.current.defaultTemporaryChat) {
+      const tempChat = createTempChatItem();
+      setIsTemporaryChat(true);
+      setChats((prev) => [tempChat, ...prev]);
+      setActiveChatId(tempChat.id);
+      return tempChat.id;
+    }
     const freshChat: ChatItem = {
       ...createEmptyChat(),
-      projectId: projectId ?? activeProjectId ?? null,
+      projectId: resolvedProjectId,
     };
     setIsTemporaryChat(false);
     setChats((prev) => [freshChat, ...prev]);
@@ -1185,21 +1370,229 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
+  const scheduleSavedReset = useCallback(() => {
+    if (prefSavedResetTimerRef.current !== null) {
+      window.clearTimeout(prefSavedResetTimerRef.current);
+    }
+    prefSavedResetTimerRef.current = window.setTimeout(() => {
+      setPrefSaveStatus("idle");
+      prefSavedResetTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  const flushPreferencesNow = useCallback(async () => {
+    if (prefSaveTimerRef.current !== null) {
+      window.clearTimeout(prefSaveTimerRef.current);
+      prefSaveTimerRef.current = null;
+    }
+    const payload = pendingPrefUpdatesRef.current;
+    pendingPrefUpdatesRef.current = {};
+    if (!payload || Object.keys(payload).length === 0) return;
+
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        setPrefSaveStatus("saving");
+        await saveUserPreferences(currentUid, payload);
+        setPrefSaveStatus("saved");
+        scheduleSavedReset();
+      } catch (err) {
+        console.error("[AUTONEXIS DB] Failed to save user preferences:", err);
+        setPrefSaveStatus("idle");
+        setFirestoreError("Couldn't save your settings. Changes stay in this session.");
+      }
+    }
+  }, [isAuthenticated, currentUid, scheduleSavedReset]);
+
+  useEffect(() => {
+    return () => {
+      if (prefSaveTimerRef.current !== null) {
+        window.clearTimeout(prefSaveTimerRef.current);
+      }
+      if (prefSavedResetTimerRef.current !== null) {
+        window.clearTimeout(prefSavedResetTimerRef.current);
+      }
+    };
+  }, []);
+
   const updatePreferences = async (updates: Partial<UserPreferences>) => {
     setPreferences((prev) => {
       const next = { ...prev, ...updates };
-      if (updates.textSize && typeof document !== "undefined") {
-        document.documentElement.setAttribute("data-text-size", updates.textSize.toLowerCase());
-      }
+      preferencesRef.current = next;
+      applyPreferenceDomAttributes(next);
       return next;
     });
-    if (isAuthenticated && currentUid && currentUid !== "guest") {
-      try {
-        await saveUserPreferences(currentUid, updates);
-      } catch (err) {
-        console.error("[AUTONEXIS DB] Failed to save user preferences:", err);
-      }
+
+    if ("webSearchDefault" in updates) {
+      setIsWebSearchActive(!!updates.webSearchDefault);
     }
+
+    if ("displayName" in updates && updates.displayName?.trim() && isAuthenticated) {
+      updateProfileName(updates.displayName.trim());
+    }
+
+    if (isGuest || currentUid === "guest") {
+      try {
+        localStorage.setItem(GUEST_PREFS_KEY, JSON.stringify(preferencesRef.current));
+        setPrefSaveStatus("saved");
+        scheduleSavedReset();
+      } catch {}
+      return;
+    }
+
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      pendingPrefUpdatesRef.current = {
+        ...pendingPrefUpdatesRef.current,
+        ...updates,
+      };
+      setPrefSaveStatus("saving");
+      if (prefSaveTimerRef.current !== null) {
+        window.clearTimeout(prefSaveTimerRef.current);
+      }
+      prefSaveTimerRef.current = window.setTimeout(() => {
+        flushPreferencesNow();
+      }, 420);
+    }
+  };
+
+  const createCustomStyle = async (
+    name: string,
+    sample: string
+  ): Promise<{ ok: boolean; error?: string; style?: CustomStyleItem }> => {
+    if (isGuest || !isAuthenticated) {
+      return { ok: false, error: "Please sign in to create custom styles." };
+    }
+    const existing = preferencesRef.current.customStyles || [];
+    if (existing.length >= 3) {
+      return { ok: false, error: "You can save up to 3 custom styles." };
+    }
+    const cleanSample = sample.trim();
+    if (cleanSample.length < 15) {
+      return { ok: false, error: "Paste a short writing sample (at least 15 characters)." };
+    }
+    const res = await createCustomStyleApi(cleanSample);
+    if (!res.description) {
+      return { ok: false, error: res.error || "Could not analyze writing style." };
+    }
+    const newStyle: CustomStyleItem = {
+      id: "style_" + Date.now(),
+      name: name.trim().slice(0, 40) || `Style ${existing.length + 1}`,
+      description: res.description.slice(0, 300),
+      createdAt: new Date().toISOString(),
+    };
+    const nextStyles = [...existing, newStyle].slice(0, 3);
+    await updatePreferences({
+      customStyles: nextStyles,
+      activeCustomStyleId: newStyle.id,
+    });
+    await flushPreferencesNow();
+    return { ok: true, style: newStyle };
+  };
+
+  const updateCustomStyle = async (
+    id: string,
+    updates: { name?: string; description?: string }
+  ) => {
+    const existing = preferencesRef.current.customStyles || [];
+    const nextStyles = existing.map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            name: updates.name !== undefined ? updates.name.trim().slice(0, 40) || s.name : s.name,
+            description:
+              updates.description !== undefined
+                ? updates.description.trim().slice(0, 300) || s.description
+                : s.description,
+          }
+        : s
+    );
+    await updatePreferences({ customStyles: nextStyles });
+  };
+
+  const deleteCustomStyle = async (id: string) => {
+    const existing = preferencesRef.current.customStyles || [];
+    const nextStyles = existing.filter((s) => s.id !== id);
+    const nextActive =
+      preferencesRef.current.activeCustomStyleId === id
+        ? null
+        : preferencesRef.current.activeCustomStyleId ?? null;
+    await updatePreferences({
+      customStyles: nextStyles,
+      activeCustomStyleId: nextActive,
+    });
+    await flushPreferencesNow();
+  };
+
+  const setActiveCustomStyle = async (id: string | null) => {
+    await updatePreferences({ activeCustomStyleId: id });
+  };
+
+  const submitProblemReport = async (
+    category: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (isGuest || !isAuthenticated || !currentUid || currentUid === "guest") {
+      return { ok: false, error: "Please sign in to send a problem report." };
+    }
+    const cleanMsg = message.trim();
+    if (!cleanMsg) {
+      return { ok: false, error: "Please describe what happened before sending." };
+    }
+    try {
+      await saveProblemReport(currentUid, {
+        category: category || "Bug",
+        message: cleanMsg,
+        appVersion: APP_VERSION,
+        browser: typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
+      });
+      return { ok: true };
+    } catch (err) {
+      console.error("[AUTONEXIS DB] Failed saving report:", err);
+      return { ok: false, error: "Couldn't send report right now. Please try again." };
+    }
+  };
+
+  const clearLocalDeviceData = () => {
+    try {
+      if (typeof localStorage !== "undefined") {
+        const toDelete: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.toLowerCase().includes("autonexis")) {
+            toDelete.push(k);
+          }
+        }
+        toDelete.forEach((k) => localStorage.removeItem(k));
+      }
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.clear();
+      }
+      if (typeof caches !== "undefined") {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            caches.delete(key).catch(() => {});
+          });
+        }).catch(() => {});
+      }
+    } catch {
+      // Ignore storage cleanup restrictions
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    const fresh = createEmptyChat();
+    setChats([fresh]);
+    setActiveChatId(fresh.id);
+    setMemories([]);
+    setProjects([]);
+    setFeedbackByMessage({});
+    setGuestMsgCount(0);
+    setPrefSaveStatus("idle");
+    const resetPrefs = { ...DEFAULT_USER_PREFERENCES };
+    setPreferences(resetPrefs);
+    preferencesRef.current = resetPrefs;
+    applyPreferenceDomAttributes(resetPrefs);
+    logout();
   };
 
   const addMemoryManual = async (text: string) => {
@@ -1482,20 +1875,25 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const buildMemoryPrompt = (
     trimmed: string,
-    targetChatId: string,
+    _targetChatId: string,
     extractedName?: string,
-    newFact?: string
+    newFact?: string,
+    isTempChat = false
   ): string => {
     const effectiveUserName =
+      preferences.nickname ||
+      preferences.displayName ||
       extractedName ||
       memory.userName ||
       (user?.display_name && user?.display_name !== "User" ? user.display_name : "User");
 
-    const pastFacts = extractAllFactsFromChats(chats);
-    const combinedFactsSet = new Set([...memory.facts, ...pastFacts]);
-    if (newFact) combinedFactsSet.add(newFact);
+    const memoryEnabled = !isTempChat && preferences.memoryEnabled !== false;
+    const pastFacts = memoryEnabled ? extractAllFactsFromChats(chats) : [];
+    const combinedFactsSet = memoryEnabled
+      ? new Set([...memory.facts, ...pastFacts])
+      : new Set<string>();
+    if (memoryEnabled && newFact) combinedFactsSet.add(newFact);
     const allFacts = Array.from(combinedFactsSet);
-    const crossChatContext = getCrossChatMemoryContext(chats, targetChatId);
 
     let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
 
@@ -1520,8 +1918,8 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       memoryPrompt += `\nLANGUAGE MANDATE: User is writing in English. Reply completely in natural, fluent English.\n`;
     }
 
-    if (extractedName) {
-      memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${trimmed}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
+    if (extractedName && memoryEnabled) {
+      memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${trimmed}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say anything prevents you.\n`;
     }
 
     const asksForName = /(?:mera|apna)\s+(?:naam|name|nam)\s+(?:kya|batao)|what(?:\s+is|\s*'s)\s+my\s+name|who\s+am\s+i/i.test(trimmed);
@@ -1530,15 +1928,12 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     const asksAboutPastChats = /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation|cheto|chizo|kya\s+baat)|tujhe\s+yaad\s+hai|kya\s+yaad\s+hai|do\s+you\s+remember/i.test(trimmed);
-    if (asksAboutPastChats) {
-      memoryPrompt += `\nCRITICAL DIRECTIVE: The user is explicitly asking about their past conversations ("${trimmed}"). You MUST review the past conversations listed below and summarize clearly, warmly, and accurately what they discussed with you in previous chats. Never claim you forgot or cannot see past chats.\n`;
+    if (asksAboutPastChats && !isTempChat && !isGuest && preferences.referencePastChats !== false) {
+      memoryPrompt += `\nNOTE: If relevant past chat snippets are provided in the conversation context below, use them accurately as background reference to answer the user's question about earlier topics.\n`;
     }
 
     if (allFacts.length > 0) {
       memoryPrompt += `Known persistent facts about user: ${allFacts.join("; ")}.\n\n`;
-    }
-    if (crossChatContext) {
-      memoryPrompt += `${crossChatContext}\n`;
     }
     return memoryPrompt;
   };
@@ -1600,9 +1995,31 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let lastTime = performance.now();
 
     const prefersReducedMotion =
-      typeof window !== "undefined" &&
-      window.matchMedia &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      !!preferencesRef.current.reduceMotion ||
+      (typeof window !== "undefined" &&
+        window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+    const triggerNotificationAndSound = (replyText: string) => {
+      if (typeof document === "undefined" || !document.hidden) return;
+      const latestPrefs = preferencesRef.current;
+      if (
+        latestPrefs.notifyInBackground &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        try {
+          const preview = replyText.replace(/\s+/g, " ").trim().slice(0, 120);
+          new Notification("AUTONEXIS Assistant", {
+            body: preview || "Your reply is ready.",
+            tag: "autonexis-reply-ready",
+          });
+        } catch {}
+      }
+      if (latestPrefs.notifySound) {
+        playQuietCompletionChime();
+      }
+    };
 
     const stopAnimation = () => {
       if (animFrameId !== null) {
@@ -1699,6 +2116,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           stopAnimation();
           saveAssistantReply(displayedBuffer);
           triggerMemoryExtraction(trimmedQuery, displayedBuffer);
+          triggerNotificationAndSound(displayedBuffer);
           setIsSending(false);
           return;
         }
@@ -1732,6 +2150,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const memoryAllowed = !isTemp && preferences.memoryEnabled !== false;
     const userContext = {
       nickname: preferences.nickname || undefined,
+      user_role: preferences.userRole || undefined,
       preferences: preferences.customInstructions || undefined,
       response_style: preferences.responseStyle || "Default",
       language: preferences.language || "Auto",
@@ -1740,6 +2159,19 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         : [],
       web_search: isWebSearchActive,
     };
+
+    const relevantPastChats =
+      !isTemp && !isGuest && preferences.referencePastChats !== false
+        ? selectRelevantPastChats(chats, capturedChatId, trimmedQuery)
+        : undefined;
+
+    const activeStyle =
+      !isTemp && !isGuest && preferences.activeCustomStyleId
+        ? (preferences.customStyles || []).find((s) => s.id === preferences.activeCustomStyleId)
+        : undefined;
+    const customStylePayload = activeStyle
+      ? { name: activeStyle.name, description: activeStyle.description }
+      : undefined;
 
     const projectContext = await resolveProjectContext(projectId, trimmedQuery);
 
@@ -1776,6 +2208,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             stopAnimation();
             saveAssistantReply(displayedBuffer);
             triggerMemoryExtraction(trimmedQuery, displayedBuffer);
+            triggerNotificationAndSound(displayedBuffer);
             setIsSending(false);
           }
         },
@@ -1793,7 +2226,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 memoryPrompt,
                 userContext,
                 isGuest,
-                projectContext
+                projectContext,
+                relevantPastChats,
+                customStylePayload
               );
               if (activeUidRef.current !== requestUid || controller.signal.aborted) {
                 return;
@@ -1801,17 +2236,21 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               flushDisplay(reply);
               saveAssistantReply(reply);
               triggerMemoryExtraction(trimmedQuery, reply);
+              triggerNotificationAndSound(reply);
             } catch {}
           } else {
             saveAssistantReply(displayedBuffer);
             triggerMemoryExtraction(trimmedQuery, displayedBuffer);
+            triggerNotificationAndSound(displayedBuffer);
           }
           stopAnimation();
           setIsSending(false);
         },
         isGuest,
         controller.signal,
-        projectContext
+        projectContext,
+        relevantPastChats,
+        customStylePayload
       );
     } catch {
       stopAnimation();
@@ -2036,7 +2475,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
 
-    const memoryPrompt = buildMemoryPrompt(trimmed, targetChatId, extractedName, newFact);
+    const memoryPrompt = buildMemoryPrompt(trimmed, targetChatId, extractedName, newFact, isTemp);
     const historyPayload: ChatMessagePayload[] = (currentChat?.messages || []).map((m) => ({
       role: m.role,
       content: m.fullPayloadContent || m.content,
@@ -2115,7 +2554,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
-    const memoryPrompt = buildMemoryPrompt(cleanNew, chatId);
+    const memoryPrompt = buildMemoryPrompt(cleanNew, chatId, undefined, undefined, isTemp);
     const historyPayload: ChatMessagePayload[] = [
       ...keptBefore.map((m) => ({
         role: m.role,
@@ -2171,6 +2610,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         resetMemory,
         updateCallName,
         updatePreferences,
+        flushPreferencesNow,
+        prefSaveStatus,
+        createCustomStyle,
+        updateCustomStyle,
+        deleteCustomStyle,
+        setActiveCustomStyle,
+        submitProblemReport,
+        clearLocalDeviceData,
         addMemoryManual,
         editMemory,
         deleteMemory,

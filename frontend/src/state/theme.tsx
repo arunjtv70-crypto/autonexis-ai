@@ -33,15 +33,30 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
 
-  // Listen to system OS theme changes
+  // Listen to system OS theme changes and synced Firestore theme updates
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
     const handler = (e: MediaQueryListEvent) => {
       setSystemTheme(e.matches ? "dark" : "light");
     };
+    const syncHandler = (e: Event) => {
+      const choice = (e as CustomEvent<ThemeChoice>).detail;
+      if (choice === "dark" || choice === "light" || choice === "auto") {
+        setThemeState(choice);
+        try {
+          localStorage.setItem(THEME_STORAGE_KEY, choice);
+        } catch {
+          // Storage unavailable / private mode
+        }
+      }
+    };
 
     mediaQuery.addEventListener("change", handler);
-    return () => mediaQuery.removeEventListener("change", handler);
+    window.addEventListener("autonexis:sync-theme", syncHandler);
+    return () => {
+      mediaQuery.removeEventListener("change", handler);
+      window.removeEventListener("autonexis:sync-theme", syncHandler);
+    };
   }, []);
 
   const resolvedTheme: ResolvedTheme = theme === "auto" ? systemTheme : theme;

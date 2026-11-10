@@ -1,16 +1,24 @@
+.user-menu-mobile-backdrop {
+  display: none;
+}
+
 .user-menu-dropdown {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  width: 260px;
+  width: 272px;
   background-color: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
   padding: 6px;
   z-index: 1000;
   animation: userMenuFadeIn 0.15s ease-out;
   backdrop-filter: blur(12px);
+}
+
+.user-menu-sheet-handle {
+  display: none;
 }
 
 @keyframes userMenuFadeIn {
@@ -28,11 +36,23 @@
   padding: 8px 10px 10px 10px;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.user-menu-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .user-menu-email {
-  font-size: 0.82rem;
-  color: var(--text-secondary);
+  font-size: 0.78rem;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -51,6 +71,7 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
+  min-height: 38px;
   padding: 8px 10px;
   background: transparent;
   border: none;
@@ -62,8 +83,10 @@
   text-align: left;
 }
 
-.user-menu-item:hover {
+.user-menu-item:hover,
+.user-menu-item:focus-visible {
   background-color: var(--surface-raised);
+  outline: none;
 }
 
 .user-menu-item-left {
@@ -71,6 +94,7 @@
   align-items: center;
   gap: 10px;
   color: inherit;
+  min-width: 0;
 }
 
 .user-menu-item-left svg {
@@ -78,15 +102,52 @@
   flex-shrink: 0;
 }
 
-.user-menu-shortcut {
+.user-menu-shortcut,
+.user-menu-meta {
   font-size: 0.72rem;
   color: var(--text-muted);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   font-family: inherit;
+  flex-shrink: 0;
 }
 
 .user-menu-arrow {
   color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+}
+
+.user-menu-submenu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 4px 16px;
+  margin-left: 14px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.user-menu-subitem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.user-menu-subitem:hover,
+.user-menu-subitem:focus-visible {
+  background-color: var(--surface-raised);
+  color: var(--text-primary);
+  outline: none;
 }
 
 .user-menu-divider {
@@ -103,8 +164,61 @@
   color: var(--danger);
 }
 
-.user-menu-logout:hover {
-  background-color: var(--danger-soft);
-  color: var(--danger);
+/* Mobile bottom sheet behavior */
+@media (max-width: 640px) {
+  .user-menu-mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.55);
+    z-index: 1090;
+    backdrop-filter: blur(2px);
+  }
+
+  .user-menu-dropdown {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    max-width: 100vw;
+    max-height: 82dvh;
+    overflow-y: auto;
+    border-radius: 18px 18px 0 0;
+    border-bottom: none;
+    padding: 8px 12px calc(14px + env(safe-area-inset-bottom, 0px));
+    z-index: 1100;
+    animation: userMenuSheetUp 0.2s ease-out;
+  }
+
+  .user-menu-sheet-handle {
+    display: block;
+    width: 38px;
+    height: 4px;
+    border-radius: 99px;
+    background-color: var(--border);
+    margin: 4px auto 10px;
+  }
+
+  .user-menu-item {
+    min-height: 44px;
+    font-size: 0.92rem;
+  }
+
+  .user-menu-subitem {
+    min-height: 40px;
+    font-size: 0.88rem;
+  }
 }
 
+@keyframes userMenuSheetUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

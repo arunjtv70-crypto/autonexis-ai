@@ -74,7 +74,7 @@ export async function resizeImageToDataUrl(
           }
         }
 
-        // Guarantee minimum 32x32 for Groq vision models
+        // Guarantee minimum 32x32 resolution for visual clarity
         width = Math.max(width, 32);
         height = Math.max(height, 32);
 

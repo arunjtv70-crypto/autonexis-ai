@@ -57,7 +57,9 @@ export async function postChatMessage(
   userMemory?: string,
   userContext?: any,
   isGuest = false,
-  projectContext?: any
+  projectContext?: any,
+  relevantPastChats?: any[],
+  customStyle?: any
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat`;
   try {
@@ -70,6 +72,8 @@ export async function postChatMessage(
         user_memory: userMemory || undefined,
         user_context: userContext || undefined,
         project_context: projectContext || undefined,
+        relevant_past_chats: relevantPastChats || undefined,
+        custom_style: customStyle || undefined,
       }),
     });
 
@@ -99,7 +103,9 @@ export async function streamChatMessage(
   onError: (err: any) => void,
   isGuest = false,
   signal?: AbortSignal,
-  projectContext?: any
+  projectContext?: any,
+  relevantPastChats?: any[],
+  customStyle?: any
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
@@ -113,6 +119,8 @@ export async function streamChatMessage(
         user_memory: userMemory || undefined,
         user_context: userContext || undefined,
         project_context: projectContext || undefined,
+        relevant_past_chats: relevantPastChats || undefined,
+        custom_style: customStyle || undefined,
       }),
     });
 
@@ -124,7 +132,15 @@ export async function streamChatMessage(
 
     if (!res.ok || !res.body) {
       // Fallback to non-streaming if stream is unsupported
-      const directReply = await postChatMessage(messages, userMemory, userContext, isGuest, projectContext);
+      const directReply = await postChatMessage(
+        messages,
+        userMemory,
+        userContext,
+        isGuest,
+        projectContext,
+        relevantPastChats,
+        customStyle
+      );
       onChunk(directReply);
       onDone();
       return;
@@ -208,5 +224,34 @@ export async function extractMemoriesApi(
   } catch (err) {
     console.warn("[AUTONEXIS] Memory extraction API call error:", err);
     return [];
+  }
+}
+
+export async function createCustomStyleApi(
+  sample: string
+): Promise<{ description: string; error?: string }> {
+  const url = `${API_BASE_URL}/style/create`;
+  try {
+    const headers = await getAuthHeaders(false);
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ sample: sample.slice(0, 2000) }),
+    });
+    if (res.status === 401) {
+      await handleUnauthorized();
+      return { description: "", error: "Please log in again to analyze styles." };
+    }
+    if (res.status === 429) {
+      return { description: "", error: "Rate limit reached. Please wait before creating another style." };
+    }
+    if (!res.ok) {
+      return { description: "", error: "Could not analyze writing style right now." };
+    }
+    const data = await res.json();
+    return { description: (data?.description || "").slice(0, 300) };
+  } catch (err) {
+    console.warn("[AUTONEXIS] Style analysis error:", err);
+    return { description: "", error: "Network error while analyzing style." };
   }
 }

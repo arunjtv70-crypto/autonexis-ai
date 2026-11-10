@@ -334,18 +334,73 @@ export async function chatExists(uid: string, chatId: string): Promise<boolean> 
 // Settings / Preferences (users/{uid}/settings/preferences)
 // ---------------------------------------------------------------------------
 
+export interface CustomStyleItem {
+  id: string;
+  name: string;
+  description: string; // max 300 chars
+  createdAt: string;
+}
+
 export interface UserPreferences {
   displayName?: string;
   nickname?: string;
+  userRole?: string;
   customInstructions?: string;
   responseStyle?: "Default" | "Short and direct" | "Detailed" | "Casual Hinglish" | "Formal";
   language?: "Auto" | "Hindi" | "Hinglish" | "English";
+  interfaceLanguage?: "English" | "Hindi" | "Hinglish";
   memoryEnabled?: boolean;
+  referencePastChats?: boolean;
   webSearchDefault?: boolean;
   theme?: "light" | "dark" | "auto";
   textSize?: "Small" | "Medium" | "Large";
+  density?: "Comfortable" | "Compact";
+  reduceMotion?: boolean;
+  codeBlockWrap?: "scroll" | "wrap";
+  voiceName?: string;
+  voiceSpeed?: number;
+  voiceLanguage?: string;
+  micLanguage?: string;
+  enterToSend?: boolean;
+  autoScroll?: boolean;
+  showStarterPrompts?: boolean;
+  notifyInBackground?: boolean;
+  notifySound?: boolean;
+  defaultTemporaryChat?: boolean;
+  breakReminderEnabled?: boolean;
+  breakReminderMinutes?: 60 | 90 | 120;
+  customStyles?: CustomStyleItem[];
+  activeCustomStyleId?: string | null;
   updatedAt?: string;
 }
+
+export const DEFAULT_USER_PREFERENCES: UserPreferences = {
+  memoryEnabled: true,
+  referencePastChats: true,
+  webSearchDefault: false,
+  theme: "auto",
+  textSize: "Medium",
+  density: "Comfortable",
+  reduceMotion: false,
+  codeBlockWrap: "scroll",
+  responseStyle: "Default",
+  language: "Auto",
+  interfaceLanguage: "English",
+  voiceName: "",
+  voiceSpeed: 1.0,
+  voiceLanguage: "en-IN",
+  micLanguage: "en-IN",
+  enterToSend: true,
+  autoScroll: true,
+  showStarterPrompts: true,
+  notifyInBackground: false,
+  notifySound: false,
+  defaultTemporaryChat: false,
+  breakReminderEnabled: false,
+  breakReminderMinutes: 60,
+  customStyles: [],
+  activeCustomStyleId: null,
+};
 
 export async function loadUserPreferences(uid: string): Promise<UserPreferences | null> {
   try {
@@ -354,15 +409,39 @@ export async function loadUserPreferences(uid: string): Promise<UserPreferences 
     if (!snap.exists()) return null;
     const data = snap.data();
     return {
-      displayName: data.displayName,
-      nickname: data.nickname,
-      customInstructions: data.customInstructions,
-      responseStyle: data.responseStyle,
-      language: data.language,
+      ...DEFAULT_USER_PREFERENCES,
+      displayName: data.displayName ?? undefined,
+      nickname: data.nickname ?? undefined,
+      userRole: data.userRole ?? undefined,
+      customInstructions: data.customInstructions ?? undefined,
+      responseStyle: data.responseStyle || "Default",
+      language: data.language || "Auto",
+      interfaceLanguage: data.interfaceLanguage || "English",
       memoryEnabled: data.memoryEnabled ?? true,
+      referencePastChats: data.referencePastChats ?? true,
       webSearchDefault: data.webSearchDefault ?? false,
-      theme: data.theme,
+      theme: data.theme || "auto",
       textSize: data.textSize || "Medium",
+      density: data.density || "Comfortable",
+      reduceMotion: data.reduceMotion ?? false,
+      codeBlockWrap: data.codeBlockWrap || "scroll",
+      voiceName: data.voiceName ?? "",
+      voiceSpeed: typeof data.voiceSpeed === "number" ? data.voiceSpeed : 1.0,
+      voiceLanguage: data.voiceLanguage || "en-IN",
+      micLanguage: data.micLanguage || "en-IN",
+      enterToSend: data.enterToSend ?? true,
+      autoScroll: data.autoScroll ?? true,
+      showStarterPrompts: data.showStarterPrompts ?? true,
+      notifyInBackground: data.notifyInBackground ?? false,
+      notifySound: data.notifySound ?? false,
+      defaultTemporaryChat: data.defaultTemporaryChat ?? false,
+      breakReminderEnabled: data.breakReminderEnabled ?? false,
+      breakReminderMinutes:
+        data.breakReminderMinutes === 90 || data.breakReminderMinutes === 120
+          ? data.breakReminderMinutes
+          : 60,
+      customStyles: Array.isArray(data.customStyles) ? data.customStyles.slice(0, 3) : [],
+      activeCustomStyleId: data.activeCustomStyleId ?? null,
       updatedAt: tsToISO(data.updatedAt),
     };
   } catch (err) {
@@ -376,14 +455,13 @@ export async function saveUserPreferences(
   prefs: Partial<UserPreferences>
 ): Promise<void> {
   const prefRef = doc(db(), "users", uid, "settings", "preferences");
-  await setDoc(
-    prefRef,
-    {
-      ...prefs,
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  const cleanPayload: Record<string, any> = { updatedAt: serverTimestamp() };
+  Object.entries(prefs).forEach(([k, v]) => {
+    if (v !== undefined) {
+      cleanPayload[k] = v;
+    }
+  });
+  await setDoc(prefRef, cleanPayload, { merge: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -776,5 +854,33 @@ export async function loadChatFeedback(
     return {};
   }
 }
+
+// ---------------------------------------------------------------------------
+// Problem Reports Store (users/{uid}/reports/{id})
+// ---------------------------------------------------------------------------
+
+export interface ProblemReportPayload {
+  category: string;
+  message: string;
+  appVersion: string;
+  browser: string;
+}
+
+export async function saveProblemReport(
+  uid: string,
+  report: ProblemReportPayload
+): Promise<string> {
+  const reportId = "rep_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+  const reportRef = doc(db(), "users", uid, "reports", reportId);
+  await setDoc(reportRef, {
+    category: report.category.slice(0, 60),
+    message: report.message.trim().slice(0, 2000),
+    appVersion: report.appVersion.slice(0, 40),
+    browser: report.browser.slice(0, 250),
+    createdAt: serverTimestamp(),
+  });
+  return reportId;
+}
+
 
 

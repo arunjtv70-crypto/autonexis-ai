@@ -346,15 +346,64 @@ export const VideoCreationCard: React.FC<VideoCardProps> = ({
   );
 };
 
-// 3. Speech Synthesis Audio Speaker Component
-export const SpeechAudioButton: React.FC<{ text: string }> = ({ text }) => {
+// 3. Speech Synthesis Audio Speaker Helper & Component
+export function speakTextWithPreferences(
+  text: string,
+  opts?: {
+    voiceName?: string;
+    voiceSpeed?: number;
+    voiceLanguage?: string;
+    onEnd?: () => void;
+  }
+): boolean {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return false;
+  }
+  window.speechSynthesis.cancel();
+  const cleanText = text.replace(/[*#`_~[\]()]/g, "").slice(0, 600);
+  if (!cleanText.trim()) return false;
+
+  const utterance = new SpeechSynthesisUtterance(cleanText);
+  const voices = window.speechSynthesis.getVoices();
+  const desiredName = opts?.voiceName;
+  const desiredLang = opts?.voiceLanguage;
+
+  let chosen = desiredName ? voices.find((v) => v.name === desiredName) : undefined;
+  if (!chosen && desiredLang) {
+    chosen = voices.find((v) => v.lang.toLowerCase().startsWith(desiredLang.toLowerCase()));
+  }
+  if (!chosen) {
+    chosen =
+      voices.find((v) => v.lang.startsWith("en-IN")) ||
+      voices.find((v) => v.lang.startsWith("hi")) ||
+      voices.find((v) => v.lang.startsWith("en"));
+  }
+  if (chosen) utterance.voice = chosen;
+  if (desiredLang) utterance.lang = desiredLang;
+  utterance.rate = typeof opts?.voiceSpeed === "number" ? Math.min(2, Math.max(0.5, opts.voiceSpeed)) : 1.0;
+
+  if (opts?.onEnd) {
+    utterance.onend = opts.onEnd;
+    utterance.onerror = opts.onEnd;
+  }
+  window.speechSynthesis.speak(utterance);
+  return true;
+}
+
+export const SpeechAudioButton: React.FC<{
+  text: string;
+  voiceName?: string;
+  voiceSpeed?: number;
+  voiceLanguage?: string;
+}> = ({ text, voiceName, voiceSpeed, voiceLanguage }) => {
   const [isSpeaking, setIsSpeaking] = useState(false);
 
+  if (typeof window !== "undefined" && !("speechSynthesis" in window)) {
+    return null;
+  }
+
   const toggleSpeech = () => {
-    if (!("speechSynthesis" in window)) {
-      alert("Speech synthesis is not supported on your browser.");
-      return;
-    }
+    if (!("speechSynthesis" in window)) return;
 
     if (isSpeaking) {
       window.speechSynthesis.cancel();
@@ -362,24 +411,14 @@ export const SpeechAudioButton: React.FC<{ text: string }> = ({ text }) => {
       return;
     }
 
-    window.speechSynthesis.cancel();
-    const cleanText = text.replace(/[*#`_~[\]()]/g, "").slice(0, 600);
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-
-    const voices = window.speechSynthesis.getVoices();
-    const targetVoice =
-      voices.find((v) => v.lang.startsWith("hi")) ||
-      voices.find((v) => v.lang.startsWith("en-IN")) ||
-      voices.find((v) => v.lang.startsWith("en"));
-
-    if (targetVoice) utterance.voice = targetVoice;
-    utterance.rate = 1.0;
-
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
     setIsSpeaking(true);
-    window.speechSynthesis.speak(utterance);
+    const started = speakTextWithPreferences(text, {
+      voiceName,
+      voiceSpeed,
+      voiceLanguage,
+      onEnd: () => setIsSpeaking(false),
+    });
+    if (!started) setIsSpeaking(false);
   };
 
   return (
