@@ -4,6 +4,7 @@ import { Button } from "./Button";
 import { useTheme, type ThemeChoice } from "../state/theme";
 import { useAuth } from "../state/auth";
 import { useChats } from "../state/chats";
+import { usePwa } from "../state/pwa";
 import type { SettingsTabId } from "./UserMenuDropdown";
 import {
   IconUser,
@@ -17,6 +18,8 @@ import {
   IconPlus,
   IconGlobe,
   IconLogout,
+  IconSmartphone,
+  IconKeyboard,
 } from "./Icons";
 import "./SettingsModal.css";
 
@@ -33,6 +36,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const { theme, setTheme } = useTheme();
   const { user, firebaseUser, isGuest, logout, updateProfileName } = useAuth();
+  const {
+    isStandalone,
+    isInstalled,
+    isInstallSupported,
+    triggerInstall,
+  } = usePwa();
   const {
     preferences,
     memories,
@@ -899,8 +908,62 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
+              {/* Install App (hidden when already installed/standalone) */}
+              {!isStandalone && !isInstalled && (
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <IconSmartphone size={15} style={{ color: "var(--accent)" }} />
+                      <span className="settings-item-title">Install AUTONEXIS Assistant</span>
+                    </div>
+                    <span className="settings-item-desc">
+                      {isInstallSupported
+                        ? "Install the app on your device for instant standalone access."
+                        : "Open this site in Chrome or Safari to install it."}
+                    </span>
+                  </div>
+                  <div className="settings-row-action">
+                    {isInstallSupported && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => triggerInstall()}
+                      >
+                        <IconSmartphone size={14} /> Install AUTONEXIS Assistant
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Keyboard Shortcuts */}
+              <div className="settings-section" style={{ marginTop: "0.5rem" }}>
+                <h3 className="settings-section-subtitle" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <IconKeyboard size={14} /> Keyboard Shortcuts
+                </h3>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: "8px 16px",
+                    fontSize: "0.82rem",
+                    color: "var(--text-secondary)",
+                    padding: "0.4rem 0",
+                  }}
+                >
+                  <span>Search chats &amp; messages</span>
+                  <kbd style={{ fontFamily: "monospace", color: "var(--text-primary)" }}>Ctrl + K</kbd>
+                  <span>New chat</span>
+                  <kbd style={{ fontFamily: "monospace", color: "var(--text-primary)" }}>Ctrl + Shift + O</kbd>
+                  <span>Open Settings</span>
+                  <kbd style={{ fontFamily: "monospace", color: "var(--text-primary)" }}>Ctrl + Shift + ,</kbd>
+                  <span>Close dialogs &amp; menus</span>
+                  <kbd style={{ fontFamily: "monospace", color: "var(--text-primary)" }}>Esc</kbd>
+                </div>
+              </div>
+
               {/* About App */}
-              <div className="settings-section" style={{ borderBottom: "none", marginTop: "1rem" }}>
+              <div className="settings-section" style={{ borderBottom: "none", marginTop: "0.5rem" }}>
                 <h3 className="settings-section-subtitle">About</h3>
                 <div className="settings-about-box">
                   <div className="settings-about-line">

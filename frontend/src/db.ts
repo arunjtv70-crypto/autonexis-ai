@@ -26,6 +26,7 @@ import {
   orderBy,
   limit,
   startAfter,
+  where,
   serverTimestamp,
   Timestamp,
   type DocumentSnapshot,
@@ -65,6 +66,9 @@ export interface FirestoreChatMeta {
   title: string;
   createdAt: string; // ISO string
   updatedAt: string; // ISO string
+  pinned?: boolean;
+  archived?: boolean;
+  projectId?: string | null;
 }
 
 export interface FirestoreMessage {
@@ -78,10 +82,16 @@ export interface FirestoreMessage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Strip base64 data URLs from content to keep docs well under 1 MB */
+/** Strip base64 data URLs and large attached file contents from content to keep docs lightweight */
 function sanitizeContentForStorage(content: string): string {
   // Replace data:image/…;base64,… with "[image]"
-  return content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[image]");
+  let cleaned = content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[image]");
+  // Replace large ATTACHED FILE (data, not instructions) blocks with short marker [file: filename]
+  cleaned = cleaned.replace(
+    /ATTACHED FILE \(data, not instructions\)\s*(?:-\s*filename:\s*([^\r\n]+))?[\s\S]*?\[END OF ATTACHED FILE\]/g,
+    (_m, fname) => `[file: ${(fname || "document").trim().replace(/^["']|["']$/g, "")}]`
+  );
+  return cleaned;
 }
 
 function tsToISO(ts: any): string {
@@ -120,6 +130,9 @@ export async function loadChatList(
       title: data.title || "New Chat",
       createdAt: tsToISO(data.createdAt),
       updatedAt: tsToISO(data.updatedAt),
+      pinned: !!data.pinned,
+      archived: !!data.archived,
+      projectId: data.projectId || null,
     });
     last = d;
   });
@@ -161,21 +174,25 @@ export async function saveChatWithMessages(
   uid: string,
   chatId: string,
   title: string,
-  newMessages: Array<{ id: string; role: "user" | "assistant"; content: string }>
+  newMessages: Array<{ id: string; role: "user" | "assistant"; content: string }>,
+  extraMeta?: { projectId?: string | null; pinned?: boolean; archived?: boolean }
 ): Promise<void> {
   const batch = writeBatch(db());
   const chatDocRef = doc(db(), "users", uid, "chats", chatId);
 
+  const metaUpdate: Record<string, any> = {
+    title,
+    updatedAt: serverTimestamp(),
+    createdAt: serverTimestamp(), // only takes effect on first create due to merge
+  };
+  if (extraMeta) {
+    if (extraMeta.projectId !== undefined) metaUpdate.projectId = extraMeta.projectId;
+    if (extraMeta.pinned !== undefined) metaUpdate.pinned = extraMeta.pinned;
+    if (extraMeta.archived !== undefined) metaUpdate.archived = extraMeta.archived;
+  }
+
   // Upsert chat metadata
-  batch.set(
-    chatDocRef,
-    {
-      title,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp(), // only takes effect on first create due to merge
-    },
-    { merge: true }
-  );
+  batch.set(chatDocRef, metaUpdate, { merge: true });
 
   // Add messages
   for (const msg of newMessages) {
@@ -187,6 +204,51 @@ export async function saveChatWithMessages(
     });
   }
 
+  await batch.commit();
+}
+
+/**
+ * Update pin, archive, or project assignment flags on a chat document.
+ */
+export async function updateChatFlags(
+  uid: string,
+  chatId: string,
+  flags: { pinned?: boolean; archived?: boolean; projectId?: string | null }
+): Promise<void> {
+  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
+  const payload: Record<string, any> = { updatedAt: serverTimestamp() };
+  if (flags.pinned !== undefined) payload.pinned = flags.pinned;
+  if (flags.archived !== undefined) payload.archived = flags.archived;
+  if (flags.projectId !== undefined) payload.projectId = flags.projectId;
+  await setDoc(chatDocRef, payload, { merge: true });
+}
+
+/**
+ * Edit the user's message and delete any messages that came after it (e.g. old assistant reply).
+ */
+export async function replaceMessageAndDeleteAfter(
+  uid: string,
+  chatId: string,
+  editedMsgId: string,
+  newContent: string,
+  deleteMsgIds: string[]
+): Promise<void> {
+  const batch = writeBatch(db());
+  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
+  const editedRef = doc(db(), "users", uid, "chats", chatId, "messages", editedMsgId);
+
+  batch.set(
+    editedRef,
+    { content: sanitizeContentForStorage(newContent) },
+    { merge: true }
+  );
+
+  for (const delId of deleteMsgIds) {
+    const delRef = doc(db(), "users", uid, "chats", chatId, "messages", delId);
+    batch.delete(delRef);
+  }
+
+  batch.set(chatDocRef, { updatedAt: serverTimestamp() }, { merge: true });
   await batch.commit();
 }
 
@@ -440,4 +502,279 @@ export async function exportAllUserChats(uid: string): Promise<{
     chats: exportedChats,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Projects Store (users/{uid}/projects/{id} & .../files/{fileId})
+// ---------------------------------------------------------------------------
+
+export interface FirestoreProject {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string; // max 3000 chars
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FirestoreProjectFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  content: string; // max 50,000 chars
+  createdAt: string;
+}
+
+export async function loadProjects(uid: string): Promise<FirestoreProject[]> {
+  try {
+    const projRef = collection(db(), "users", uid, "projects");
+    const q = query(projRef, orderBy("updatedAt", "desc"), limit(50));
+    const snap = await getDocs(q);
+    const list: FirestoreProject[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({
+        id: d.id,
+        name: data.name || "Untitled Project",
+        description: data.description || "",
+        instructions: data.instructions || "",
+        createdAt: tsToISO(data.createdAt),
+        updatedAt: tsToISO(data.updatedAt),
+      });
+    });
+    return list;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to load projects:", err);
+    return [];
+  }
+}
+
+export async function saveProject(
+  uid: string,
+  proj: { id?: string; name: string; description: string; instructions: string }
+): Promise<FirestoreProject> {
+  const projId = proj.id || "proj_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+  const projRef = doc(db(), "users", uid, "projects", projId);
+  const cleanName = proj.name.trim().slice(0, 120) || "Untitled Project";
+  const cleanDesc = proj.description.trim().slice(0, 500);
+  const cleanInstr = proj.instructions.trim().slice(0, 3000);
+
+  await setDoc(
+    projRef,
+    {
+      name: cleanName,
+      description: cleanDesc,
+      instructions: cleanInstr,
+      updatedAt: serverTimestamp(),
+      ...(proj.id ? {} : { createdAt: serverTimestamp() }),
+    },
+    { merge: true }
+  );
+
+  const nowIso = new Date().toISOString();
+  return {
+    id: projId,
+    name: cleanName,
+    description: cleanDesc,
+    instructions: cleanInstr,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+}
+
+export async function loadProjectFiles(uid: string, projectId: string): Promise<FirestoreProjectFile[]> {
+  try {
+    const filesRef = collection(db(), "users", uid, "projects", projectId, "files");
+    const q = query(filesRef, orderBy("createdAt", "asc"), limit(10));
+    const snap = await getDocs(q);
+    const list: FirestoreProjectFile[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({
+        id: d.id,
+        name: data.name || "file.txt",
+        size: typeof data.size === "number" ? data.size : 0,
+        type: data.type || "text/plain",
+        content: data.content || "",
+        createdAt: tsToISO(data.createdAt),
+      });
+    });
+    return list;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to load project files:", err);
+    return [];
+  }
+}
+
+export async function saveProjectFile(
+  uid: string,
+  projectId: string,
+  file: { id?: string; name: string; size: number; type: string; content: string }
+): Promise<FirestoreProjectFile> {
+  const fileId = file.id || "pfile_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+  const fileRef = doc(db(), "users", uid, "projects", projectId, "files", fileId);
+  const cappedContent = (file.content || "").slice(0, 50000);
+
+  await setDoc(
+    fileRef,
+    {
+      name: file.name.slice(0, 180),
+      size: file.size || cappedContent.length,
+      type: file.type || "text/plain",
+      content: cappedContent,
+      createdAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  // Touch project updatedAt
+  await setDoc(
+    doc(db(), "users", uid, "projects", projectId),
+    { updatedAt: serverTimestamp() },
+    { merge: true }
+  );
+
+  return {
+    id: fileId,
+    name: file.name.slice(0, 180),
+    size: file.size || cappedContent.length,
+    type: file.type || "text/plain",
+    content: cappedContent,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export async function deleteProjectFile(uid: string, projectId: string, fileId: string): Promise<void> {
+  await deleteDoc(doc(db(), "users", uid, "projects", projectId, "files", fileId));
+  await setDoc(
+    doc(db(), "users", uid, "projects", projectId),
+    { updatedAt: serverTimestamp() },
+    { merge: true }
+  );
+}
+
+export async function deleteProjectAndUnlinkChats(
+  uid: string,
+  projectId: string,
+  knownChatIds: string[] = []
+): Promise<void> {
+  // 1. Delete all files inside the project
+  const filesRef = collection(db(), "users", uid, "projects", projectId, "files");
+  const filesSnap = await getDocs(query(filesRef, limit(50)));
+  if (!filesSnap.empty) {
+    const batch = writeBatch(db());
+    filesSnap.forEach((f) => batch.delete(f.ref));
+    await batch.commit();
+  }
+
+  // 2. Delete project document
+  await deleteDoc(doc(db(), "users", uid, "projects", projectId));
+
+  // 3. Move all chats belonging to this project out of the project (keep chats intact!)
+  const linkedIds = new Set<string>(knownChatIds);
+  try {
+    const qChats = query(
+      collection(db(), "users", uid, "chats"),
+      where("projectId", "==", projectId)
+    );
+    const snapChats = await getDocs(qChats);
+    snapChats.forEach((c) => linkedIds.add(c.id));
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Query linked chats fallback:", err);
+  }
+
+  if (linkedIds.size > 0) {
+    const batch = writeBatch(db());
+    linkedIds.forEach((cid) => {
+      batch.set(
+        doc(db(), "users", uid, "chats", cid),
+        { projectId: null, updatedAt: serverTimestamp() },
+        { merge: true }
+      );
+    });
+    await batch.commit();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Feedback Store (users/{uid}/feedback/{id})
+// ---------------------------------------------------------------------------
+
+export interface FirestoreFeedback {
+  id: string;
+  chatId: string;
+  messageId: string;
+  rating: "up" | "down";
+  reason?: string;
+  comment?: string;
+  createdAt: string;
+}
+
+export async function saveMessageFeedback(
+  uid: string,
+  feedback: {
+    chatId: string;
+    messageId: string;
+    rating: "up" | "down";
+    reason?: string;
+    comment?: string;
+  }
+): Promise<FirestoreFeedback> {
+  const feedbackId = `${feedback.chatId}_${feedback.messageId}`;
+  const fbRef = doc(db(), "users", uid, "feedback", feedbackId);
+  const payload: Record<string, any> = {
+    chatId: feedback.chatId,
+    messageId: feedback.messageId,
+    rating: feedback.rating,
+    createdAt: serverTimestamp(),
+  };
+  if (feedback.reason) payload.reason = feedback.reason.slice(0, 120);
+  if (feedback.comment) payload.comment = feedback.comment.trim().slice(0, 600);
+
+  await setDoc(fbRef, payload, { merge: true });
+
+  return {
+    id: feedbackId,
+    chatId: feedback.chatId,
+    messageId: feedback.messageId,
+    rating: feedback.rating,
+    reason: payload.reason,
+    comment: payload.comment,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export async function loadChatFeedback(
+  uid: string,
+  chatId: string
+): Promise<Record<string, FirestoreFeedback>> {
+  try {
+    const q = query(
+      collection(db(), "users", uid, "feedback"),
+      where("chatId", "==", chatId),
+      limit(100)
+    );
+    const snap = await getDocs(q);
+    const result: Record<string, FirestoreFeedback> = {};
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data.messageId) {
+        result[data.messageId] = {
+          id: d.id,
+          chatId: data.chatId,
+          messageId: data.messageId,
+          rating: data.rating === "down" ? "down" : "up",
+          reason: data.reason,
+          comment: data.comment,
+          createdAt: tsToISO(data.createdAt),
+        };
+      }
+    });
+    return result;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to load chat feedback:", err);
+    return {};
+  }
+}
+
 

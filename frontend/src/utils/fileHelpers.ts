@@ -7,6 +7,16 @@ export function isImageFile(file: File): boolean {
   return file.type.startsWith("image/");
 }
 
+export function isPdfFile(file: File): boolean {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
+export function formatFileSize(bytes: number): string {
+  if (!bytes || bytes < 1024) return `${Math.max(1, bytes || 0)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const TEXT_FILE_EXTENSIONS = [
   ".txt",
   ".md",
@@ -173,3 +183,82 @@ export async function readTextFile(file: File): Promise<string> {
     reader.readAsText(file);
   });
 }
+
+export interface PdfExtractResult {
+  text: string;
+  totalPages: number;
+  extractedPages: number;
+  truncated: boolean;
+  truncationNote?: string;
+  isScanned: boolean;
+}
+
+/**
+ * Lazily loads pdfjs-dist with its local worker and extracts text from a PDF file.
+ * Limits: up to maxPages (default 20) and maxChars (default 30,000).
+ * Detects scanned/image-only PDFs cleanly.
+ */
+export async function extractPdfText(
+  file: File,
+  maxPages = 20,
+  maxChars = 30000
+): Promise<PdfExtractResult> {
+  const pdfjsLib = await import("pdfjs-dist");
+  const workerModule = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+
+  const totalPages = pdf.numPages || 0;
+  const pagesToRead = Math.min(totalPages, maxPages);
+  const pageTexts: string[] = [];
+  let charCount = 0;
+  let charTruncated = false;
+
+  for (let pageNum = 1; pageNum <= pagesToRead; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const strings = textContent.items
+      .map((item: any) => (typeof item?.str === "string" ? item.str : ""))
+      .filter(Boolean);
+    const pageStr = strings.join(" ").replace(/\s+/g, " ").trim();
+    if (pageStr) {
+      const formattedPage = `[Page ${pageNum}]\n${pageStr}`;
+      if (charCount + formattedPage.length > maxChars) {
+        const remaining = maxChars - charCount;
+        if (remaining > 50) {
+          pageTexts.push(formattedPage.slice(0, remaining) + "...");
+        }
+        charTruncated = true;
+        break;
+      }
+      pageTexts.push(formattedPage);
+      charCount += formattedPage.length + 2;
+    }
+  }
+
+  const combinedText = pageTexts.join("\n\n").trim();
+  const isScanned = combinedText.length < 20;
+  const pageTruncated = totalPages > maxPages;
+  const truncated = pageTruncated || charTruncated;
+
+  let truncationNote: string | undefined;
+  if (truncated) {
+    const reasons: string[] = [];
+    if (pageTruncated) reasons.push(`first ${maxPages} of ${totalPages} pages`);
+    if (charTruncated) reasons.push(`first ~${maxChars.toLocaleString()} characters`);
+    truncationNote = `Note: Only ${reasons.join(" and ")} were extracted to stay within size limits.`;
+  }
+
+  return {
+    text: combinedText,
+    totalPages,
+    extractedPages: pagesToRead,
+    truncated,
+    truncationNote,
+    isScanned,
+  };
+}
+

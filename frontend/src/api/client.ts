@@ -56,7 +56,8 @@ export async function postChatMessage(
   messages: ChatMessagePayload[],
   userMemory?: string,
   userContext?: any,
-  isGuest = false
+  isGuest = false,
+  projectContext?: any
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat`;
   try {
@@ -68,6 +69,7 @@ export async function postChatMessage(
         messages,
         user_memory: userMemory || undefined,
         user_context: userContext || undefined,
+        project_context: projectContext || undefined,
       }),
     });
 
@@ -96,7 +98,8 @@ export async function streamChatMessage(
   onDone: () => void,
   onError: (err: any) => void,
   isGuest = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  projectContext?: any
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
@@ -109,6 +112,7 @@ export async function streamChatMessage(
         messages,
         user_memory: userMemory || undefined,
         user_context: userContext || undefined,
+        project_context: projectContext || undefined,
       }),
     });
 
@@ -120,7 +124,7 @@ export async function streamChatMessage(
 
     if (!res.ok || !res.body) {
       // Fallback to non-streaming if stream is unsupported
-      const directReply = await postChatMessage(messages, userMemory, userContext, isGuest);
+      const directReply = await postChatMessage(messages, userMemory, userContext, isGuest, projectContext);
       onChunk(directReply);
       onDone();
       return;

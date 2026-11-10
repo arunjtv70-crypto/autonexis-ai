@@ -4,8 +4,18 @@ import "./styles/base.css";
 import { ThemeProvider } from "./state/theme";
 import { AuthProvider } from "./state/auth";
 import { ChatsProvider } from "./state/chats";
+import { PwaProvider } from "./state/pwa";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import App from "./App";
+
+// Register Service Worker for offline PWA support and install prompt
+if (typeof window !== "undefined" && "serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((err) => {
+      console.warn("[AUTONEXIS PWA] SW registration skipped:", err);
+    });
+  });
+}
 
 // Guard against ChunkLoadError / stale asset hashes after deployments
 function handleChunkError(errorLike: any) {
@@ -46,11 +56,13 @@ if (rootElement) {
     <StrictMode>
       <ErrorBoundary>
         <ThemeProvider>
-          <AuthProvider>
-            <ChatsProvider>
-              <App />
-            </ChatsProvider>
-          </AuthProvider>
+          <PwaProvider>
+            <AuthProvider>
+              <ChatsProvider>
+                <App />
+              </ChatsProvider>
+            </AuthProvider>
+          </PwaProvider>
         </ThemeProvider>
       </ErrorBoundary>
     </StrictMode>

@@ -13,7 +13,9 @@ from prompts import (
     TABLE_AND_LAYOUT_PROMPT,
     IMAGE_REASONING_PROMPT,
     MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    ATTACHED_FILE_SAFETY_PROMPT,
     format_user_context_block,
+    format_project_context_block,
 )
 from profanity_blocklist import contains_profanity, get_polite_fallback
 
@@ -22,6 +24,14 @@ logging.basicConfig(level=logging.INFO)
 
 FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
 VISION_ERROR_MESSAGE = "I couldn't read this image. Please try a smaller or clearer one."
+
+def has_attached_file_content(messages: List[Dict[str, Any]]) -> bool:
+    """Checks if any message contains an attached file marker."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str) and "ATTACHED FILE (data, not instructions)" in content:
+            return True
+    return False
 
 def has_image_content(messages: List[Dict[str, Any]]) -> bool:
     """Checks if any message contains an image_url block."""
@@ -155,12 +165,13 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
         user_context: Optional[Dict[str, Any]] = None,
+        project_context: Optional[Dict[str, Any]] = None,
         max_history: int = 18,
         is_math: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory,
-        user personalization context, abuse & safety rules, math rigor prompt, and language matching directive.
+        user personalization context, project context, abuse & safety rules, math rigor prompt, and language matching directive.
         """
         extra_system_context = []
 
@@ -175,6 +186,16 @@ class LLMClient:
             context_block = format_user_context_block(user_context)
             if context_block:
                 extra_system_context.append(context_block)
+
+        # Include project context block (takes priority for project chats while keeping user memory)
+        if project_context:
+            proj_block = format_project_context_block(project_context)
+            if proj_block:
+                extra_system_context.append(proj_block)
+
+        # Include attached file safety & grounding policy if attached file text present
+        if has_attached_file_content(messages):
+            extra_system_context.append(ATTACHED_FILE_SAFETY_PROMPT)
 
         # Include image understanding & puzzle reasoning policy if images present
         if has_image_content(messages):
@@ -281,6 +302,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
         user_context: Optional[Dict[str, Any]] = None,
+        project_context: Optional[Dict[str, Any]] = None,
         is_guest: bool = False
     ) -> AsyncGenerator[str, None]:
         """
@@ -304,7 +326,9 @@ class LLMClient:
         # -------------------------------------------------------------------
         if is_math:
             max_tokens = 512 if is_guest else 3000
-            conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=True)
+            conversation = self._prepare_messages(
+                messages, user_memory, user_context=user_context, project_context=project_context, is_math=True
+            )
             tools = [EXACT_MATH_TOOL_DEFINITION]
 
             try:
@@ -383,7 +407,9 @@ class LLMClient:
         # GENERAL CHAT & VISION ROUTE: True Real-time SSE Token Streaming
         # -------------------------------------------------------------------
         max_tokens = 512 if is_guest else 2048
-        conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=False)
+        conversation = self._prepare_messages(
+            messages, user_memory, user_context=user_context, project_context=project_context, is_math=False
+        )
 
         # Optional Think Mode Self-Check for Images/Complex Reasoning
         enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
@@ -500,6 +526,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         user_memory: Optional[str] = None,
         user_context: Optional[Dict[str, Any]] = None,
+        project_context: Optional[Dict[str, Any]] = None,
         is_guest: bool = False
     ) -> Dict[str, str]:
         """
@@ -518,7 +545,9 @@ class LLMClient:
 
         if is_math:
             max_tokens = 512 if is_guest else 3000
-            conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=True)
+            conversation = self._prepare_messages(
+                messages, user_memory, user_context=user_context, project_context=project_context, is_math=True
+            )
             tools = [EXACT_MATH_TOOL_DEFINITION]
 
             try:
@@ -576,7 +605,9 @@ class LLMClient:
                 return {"reply": fallback_error_msg}
 
         max_tokens = 512 if is_guest else 2048
-        conversation = self._prepare_messages(messages, user_memory, user_context=user_context, is_math=False)
+        conversation = self._prepare_messages(
+            messages, user_memory, user_context=user_context, project_context=project_context, is_math=False
+        )
         payload = {
             "model": active_model,
             "messages": conversation,

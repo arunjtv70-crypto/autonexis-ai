@@ -58,6 +58,7 @@ class DirectChatRequest(BaseModel):
     chat_id: Optional[str] = None
     user_memory: Optional[str] = None
     user_context: Optional[Dict[str, Any]] = None
+    project_context: Optional[Dict[str, Any]] = None
 
 class MemoryExtractMessage(BaseModel):
     role: str
@@ -145,6 +146,7 @@ async def chat_direct(
         messages_payload,
         req.user_memory,
         user_context=req.user_context,
+        project_context=req.project_context,
         is_guest=is_guest
     )
     return result
@@ -196,6 +198,7 @@ async def chat_stream_endpoint(
             messages_payload,
             req.user_memory,
             user_context=req.user_context,
+            project_context=req.project_context,
             is_guest=is_guest
         ),
         media_type="text/event-stream",
