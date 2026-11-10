@@ -52,6 +52,9 @@ export const ChatScreen: React.FC = () => {
     guestMessagesRemaining,
     showGuestLimitModal,
     setShowGuestLimitModal,
+    loadMoreChats,
+    hasMoreChats,
+    firestoreError,
   } = useChats();
 
   const { user, firebaseUser, isGuest, setIsAuthScreenVisible, logout } = useAuth();
@@ -470,6 +473,26 @@ export const ChatScreen: React.FC = () => {
             );
           })
         )}
+        {hasMoreChats && (
+          <button
+            type="button"
+            className="sidebar-load-more-btn"
+            onClick={loadMoreChats}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              marginTop: "6px",
+              background: "transparent",
+              border: "1px dashed var(--border-subtle, rgba(255, 255, 255, 0.15))",
+              borderRadius: "8px",
+              color: "var(--text-secondary, #94a3b8)",
+              fontSize: "0.8rem",
+              cursor: "pointer",
+            }}
+          >
+            Load more chats
+          </button>
+        )}
       </div>
 
       {/* Bottom User Profile & Settings */}
@@ -623,6 +646,22 @@ export const ChatScreen: React.FC = () => {
                   Back at it, {userName}
                 </h1>
               </div>
+
+              {firestoreError && (
+                <div
+                  style={{
+                    padding: "6px 14px",
+                    fontSize: "0.78rem",
+                    backgroundColor: "rgba(234, 179, 8, 0.12)",
+                    color: "var(--text-secondary, #eab308)",
+                    borderRadius: "6px",
+                    textAlign: "center",
+                    marginBottom: "10px",
+                  }}
+                >
+                  {firestoreError}
+                </div>
+              )}
 
               {/* Main Rounded Input Card */}
               <div className="chat-input-card">
@@ -1043,6 +1082,23 @@ export const ChatScreen: React.FC = () => {
         {/* Bottom Input Zone (Visible when in active conversation) */}
         {activeChat && activeChat.messages.length > 0 && (
           <footer className="conversation-input-bar">
+            {firestoreError && (
+              <div
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "0.78rem",
+                  backgroundColor: "rgba(234, 179, 8, 0.12)",
+                  color: "var(--text-secondary, #eab308)",
+                  borderRadius: "6px",
+                  textAlign: "center",
+                  marginBottom: "6px",
+                  maxWidth: "500px",
+                  margin: "0 auto 6px",
+                }}
+              >
+                {firestoreError}
+              </div>
+            )}
             <div className="chat-input-card">
               <textarea
                 ref={textareaRef}

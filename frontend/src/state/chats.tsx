@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
 import {
   postChatMessage,
   streamChatMessage,
@@ -6,6 +6,16 @@ import {
   type MultimodalPart,
 } from "../api/client";
 import { useAuth } from "./auth";
+import {
+  loadChatList,
+  loadChatMessages,
+  saveChatWithMessages,
+  updateChatTitle as dbUpdateChatTitle,
+  deleteOneChat as dbDeleteOneChat,
+  deleteAllChats as dbDeleteAllChats,
+  type FirestoreChatMeta,
+  type FirestoreMessage,
+} from "../db";
 
 export interface MessageItem {
   id: string;
@@ -37,6 +47,8 @@ export interface ChatItem {
   title: string;
   updated_at: string;
   messages: MessageItem[];
+  /** Whether messages have been loaded from Firestore yet */
+  _messagesLoaded?: boolean;
 }
 
 export interface UserMemoryStore {
@@ -66,65 +78,78 @@ export interface ChatsContextType {
   guestMessagesRemaining: number;
   showGuestLimitModal: boolean;
   setShowGuestLimitModal: (show: boolean) => void;
+  loadMoreChats: () => Promise<void>;
+  hasMoreChats: boolean;
+  firestoreError: string | null;
 }
 
-// One-time legacy cleanup to permanently erase un-namespaced shared keys
-const LEGACY_CLEANUP_KEY = "autonexis_legacy_v2_cleaned";
+// ---------------------------------------------------------------------------
+// One-time legacy localStorage cleanup
+// ---------------------------------------------------------------------------
+const LEGACY_CLEANUP_KEY = "autonexis_legacy_v3_cleaned";
 if (typeof window !== "undefined") {
   try {
     if (!localStorage.getItem(LEGACY_CLEANUP_KEY)) {
+      // Remove old un-namespaced keys
       localStorage.removeItem("autonexis_saved_chats");
       localStorage.removeItem("autonexis_user_memories");
       localStorage.removeItem("autonexis_user_avatar");
       localStorage.removeItem("autonexis_guest_msg_count");
+      // Remove old per-user localStorage chat keys (pattern: autonexis:{uid}:chats)
+      // These were the old source of truth; Firestore is now the source of truth.
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.match(/^autonexis:[^:]+:chats$/) || key.match(/^autonexis:[^:]+:active_chat_id$/))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
       localStorage.setItem(LEGACY_CLEANUP_KEY, "true");
     }
   } catch {}
 }
 
-// User-namespaced storage key helpers
-function getChatsStorageKey(uid: string | null): string {
-  if (!uid) return "autonexis:guest:chats";
-  return `autonexis:${uid}:chats`;
-}
+// ---------------------------------------------------------------------------
+// Guest-only localStorage helpers (guest chats NEVER go to Firestore)
+// ---------------------------------------------------------------------------
+const GUEST_CHATS_KEY = "autonexis:guest:chats";
+const GUEST_MEMORY_KEY = "autonexis:guest:memory";
+const GUEST_MSG_COUNT_KEY = "autonexis:guest:msg_count";
 
 function getMemoryStorageKey(uid: string | null): string {
-  if (!uid) return "autonexis:guest:memory";
+  if (!uid || uid === "guest") return GUEST_MEMORY_KEY;
   return `autonexis:${uid}:memory`;
 }
-
-function getActiveChatIdKey(uid: string | null): string {
-  if (!uid) return "autonexis:guest:active_chat_id";
-  return `autonexis:${uid}:active_chat_id`;
-}
-
-const GUEST_MSG_COUNT_KEY = "autonexis:guest:msg_count";
 
 function createEmptyChat(): ChatItem {
   return {
     id: "chat-" + Date.now(),
     title: "New Chat",
-    updated_at: "Just now",
+    updated_at: new Date().toISOString(),
     messages: [],
+    _messagesLoaded: true,
   };
 }
 
-function loadStoredChats(uid: string | null): ChatItem[] {
-  if (!uid) return [createEmptyChat()];
+function loadGuestChats(): ChatItem[] {
   try {
-    const raw = localStorage.getItem(getChatsStorageKey(uid));
+    const raw = localStorage.getItem(GUEST_CHATS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     }
   } catch {}
   return [createEmptyChat()];
 }
 
+function saveGuestChats(chats: ChatItem[]): void {
+  try {
+    localStorage.setItem(GUEST_CHATS_KEY, JSON.stringify(chats));
+  } catch {}
+}
+
 function loadStoredMemory(uid: string | null, fallbackName: string): UserMemoryStore {
-  if (!uid) return { userName: fallbackName, facts: [] };
   try {
     const raw = localStorage.getItem(getMemoryStorageKey(uid));
     if (raw) {
@@ -138,6 +163,9 @@ function loadStoredMemory(uid: string | null, fallbackName: string): UserMemoryS
   return { userName: fallbackName, facts: [] };
 }
 
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
 const ChatsContext = createContext<ChatsContextType | undefined>(undefined);
 
 // Helper function to extract personal facts mentioned across chats
@@ -149,17 +177,14 @@ function extractAllFactsFromChats(allChats: ChatItem[]): string[] {
     for (const m of c.messages) {
       if (m.role === "user") {
         const text = m.content.trim();
-        // City / Location
         const cityMatch = text.match(/(?:rehta hu|living in|from|live in)\s+([A-Za-z\u0900-\u097F]+)/i);
         if (cityMatch && cityMatch[1] && cityMatch[1].length >= 3) {
           factsSet.add(`Lives in: ${cityMatch[1].trim()}`);
         }
-        // Work / Role
         const profMatch = text.match(/(?:kaam karta hu|working as|main ek|i am a|i work as)\s+([A-Za-z\u0900-\u097F\s]{3,25})/i);
         if (profMatch && profMatch[1]) {
           factsSet.add(`Work: ${profMatch[1].trim()}`);
         }
-        // Likes
         const likeMatch = text.match(/(?:mujhe|i like|i love)\s+([^,.]+?)\s+(?:pasand hai|accha lagta hai)/i);
         if (likeMatch && likeMatch[1]) {
           factsSet.add(`Likes: ${likeMatch[1].trim()}`);
@@ -204,9 +229,54 @@ function getCrossChatMemoryContext(allChats: ChatItem[], currentId: string | nul
   return sections.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Firestore background save helpers (fire-and-forget with retry)
+// ---------------------------------------------------------------------------
+
+type PendingSave = {
+  uid: string;
+  chatId: string;
+  title: string;
+  messages: Array<{ id: string; role: "user" | "assistant"; content: string }>;
+  retries?: number;
+};
+
+const DEFAULT_RETRIES = 2;
+const RETRY_DELAY_MS = 2000;
+
+async function backgroundSave(
+  save: PendingSave,
+  setError: (msg: string | null) => void
+): Promise<void> {
+  const maxAttempts = (save.retries ?? DEFAULT_RETRIES) + 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      await saveChatWithMessages(save.uid, save.chatId, save.title, save.messages);
+      setError(null);
+      return;
+    } catch (err: any) {
+      console.error(`[AUTONEXIS DB] Save failed (attempt ${attempt + 1}/${maxAttempts}):`, err);
+      if (attempt < maxAttempts - 1) {
+        setError("Couldn't save this chat. Retrying...");
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)));
+      } else {
+        const errMsg = err?.code === "permission-denied"
+          ? "Chat save failed: permission denied. Please log out and log back in."
+          : "Couldn't save this chat. Your messages are safe in memory.";
+        setError(errMsg);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
 export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isGuest, updateProfileName } = useAuth();
   const currentUid = user?.id || (isGuest ? "guest" : null);
+  const isAuthenticated = !!user?.id && !isGuest;
 
   // References to actively track current UID and abort in-flight streams on switch
   const activeUidRef = useRef<string | null>(currentUid);
@@ -228,29 +298,141 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return loadStoredMemory(currentUid, defName);
   });
 
-  // Load saved chats
+  // Chat state
   const [chats, setChats] = useState<ChatItem[]>(() => {
-    return loadStoredChats(currentUid);
+    if (currentUid === "guest") return loadGuestChats();
+    return [createEmptyChat()]; // will be replaced by Firestore load
   });
-
   const [activeChatId, setActiveChatId] = useState<string | null>(() => {
-    const initialChats = loadStoredChats(currentUid);
-    if (!currentUid) return initialChats[0]?.id || null;
-    try {
-      const saved = localStorage.getItem(getActiveChatIdKey(currentUid));
-      if (saved && initialChats.some((c) => c.id === saved)) {
-        return saved;
-      }
-    } catch {}
-    return initialChats[0]?.id || null;
+    const initial = currentUid === "guest" ? loadGuestChats() : [createEmptyChat()];
+    return initial[0]?.id || null;
   });
-
   const [isSending, setIsSending] = useState(false);
 
-  // Immediate account-switching effect: abort streams, reset memory, load user's isolated data
+  // Firestore pagination state
+  const lastDocRef = useRef<any>(null);
+  const [hasMoreChats, setHasMoreChats] = useState(false);
+
+  // Firestore error state for calm messaging
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+
+  // Track which chat messages have been loaded from Firestore
+  const loadedChatIdsRef = useRef<Set<string>>(new Set());
+
+  // Track message IDs already saved to Firestore to avoid double-writes
+  const savedMsgIdsRef = useRef<Set<string>>(new Set());
+
+  // -----------------------------------------------------------------------
+  // Load chats from Firestore on login / account switch
+  // -----------------------------------------------------------------------
+  const loadChatsFromFirestore = useCallback(async (uid: string) => {
+    if (!uid || uid === "guest") return;
+    try {
+      lastDocRef.current = null;
+      loadedChatIdsRef.current = new Set();
+      savedMsgIdsRef.current = new Set();
+      const result = await loadChatList(uid, 50);
+      const chatItems: ChatItem[] = result.chats.map((meta: FirestoreChatMeta) => ({
+        id: meta.id,
+        title: meta.title,
+        updated_at: meta.updatedAt,
+        messages: [],
+        _messagesLoaded: false,
+      }));
+      lastDocRef.current = result.lastDoc;
+      setHasMoreChats(result.chats.length === 50);
+      if (chatItems.length === 0) {
+        const fresh = createEmptyChat();
+        setChats([fresh]);
+        setActiveChatId(fresh.id);
+      } else {
+        setChats(chatItems);
+        setActiveChatId(chatItems[0].id);
+        // Eagerly load messages for the first chat
+        try {
+          const msgs = await loadChatMessages(uid, chatItems[0].id);
+          const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }));
+          loadedChatIdsRef.current.add(chatItems[0].id);
+          msgs.forEach((m) => savedMsgIdsRef.current.add(m.id));
+          setChats((prev) =>
+            prev.map((c) =>
+              c.id === chatItems[0].id
+                ? { ...c, messages: messageItems, _messagesLoaded: true }
+                : c
+            )
+          );
+        } catch (err) {
+          console.warn("[AUTONEXIS DB] Failed to load first chat messages:", err);
+        }
+      }
+      setFirestoreError(null);
+    } catch (err: any) {
+      console.error("[AUTONEXIS DB] Failed to load chat list:", err);
+      setFirestoreError("Couldn't load your chats. Working in offline mode.");
+      const fresh = createEmptyChat();
+      setChats([fresh]);
+      setActiveChatId(fresh.id);
+    }
+  }, []);
+
+  // -----------------------------------------------------------------------
+  // Load more chats (pagination)
+  // -----------------------------------------------------------------------
+  const loadMoreChats = useCallback(async () => {
+    if (!isAuthenticated || !currentUid || !lastDocRef.current) return;
+    try {
+      const result = await loadChatList(currentUid, 50, lastDocRef.current);
+      const newItems: ChatItem[] = result.chats.map((meta: FirestoreChatMeta) => ({
+        id: meta.id,
+        title: meta.title,
+        updated_at: meta.updatedAt,
+        messages: [],
+        _messagesLoaded: false,
+      }));
+      lastDocRef.current = result.lastDoc;
+      setHasMoreChats(result.chats.length === 50);
+      setChats((prev) => [...prev, ...newItems]);
+    } catch (err) {
+      console.error("[AUTONEXIS DB] Failed to load more chats:", err);
+    }
+  }, [isAuthenticated, currentUid]);
+
+  // -----------------------------------------------------------------------
+  // Load messages for a specific chat when selected
+  // -----------------------------------------------------------------------
+  const loadMessagesForChat = useCallback(async (uid: string, chatId: string) => {
+    if (!uid || uid === "guest" || loadedChatIdsRef.current.has(chatId)) return;
+    try {
+      const msgs = await loadChatMessages(uid, chatId);
+      const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      }));
+      loadedChatIdsRef.current.add(chatId);
+      msgs.forEach((m) => savedMsgIdsRef.current.add(m.id));
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === chatId ? { ...c, messages: messageItems, _messagesLoaded: true } : c
+        )
+      );
+    } catch (err) {
+      console.warn("[AUTONEXIS DB] Failed to load messages for chat:", chatId, err);
+    }
+  }, []);
+
+  // -----------------------------------------------------------------------
+  // Account switching / login / logout
+  // -----------------------------------------------------------------------
   useEffect(() => {
     if (activeUidRef.current !== currentUid) {
-      // 1. Immediately abort any in-flight stream
+      // 1. Abort any in-flight stream
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
@@ -261,34 +443,54 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       activeUidRef.current = currentUid;
 
       // 3. Clear and reload user-specific data
-      const loaded = loadStoredChats(currentUid);
-      setChats(loaded);
-
-      let targetActiveId: string | null = loaded[0]?.id || null;
-      if (currentUid) {
-        try {
-          const saved = localStorage.getItem(getActiveChatIdKey(currentUid));
-          if (saved && loaded.some((c) => c.id === saved)) {
-            targetActiveId = saved;
-          }
-        } catch {}
-      }
-      setActiveChatId(targetActiveId);
-
-      const defName = user?.display_name && user.display_name !== "User" ? user.display_name : "User";
-      setMemory(loadStoredMemory(currentUid, defName));
-
-      if (currentUid === "guest") {
+      if (currentUid && currentUid !== "guest") {
+        // Authenticated user → load from Firestore
+        loadChatsFromFirestore(currentUid);
+      } else if (currentUid === "guest") {
+        // Guest → load from localStorage
+        const loaded = loadGuestChats();
+        setChats(loaded);
+        setActiveChatId(loaded[0]?.id || null);
         try {
           setGuestMsgCount(parseInt(localStorage.getItem(GUEST_MSG_COUNT_KEY) || "0", 10));
         } catch {
           setGuestMsgCount(0);
         }
+      } else {
+        // Logged out → clear in-memory state only (NEVER delete Firestore data)
+        const fresh = createEmptyChat();
+        setChats([fresh]);
+        setActiveChatId(fresh.id);
+        loadedChatIdsRef.current = new Set();
+        savedMsgIdsRef.current = new Set();
       }
-    }
-  }, [currentUid, user?.display_name]);
 
-  // Sync memory to user-namespaced storage
+      const defName = user?.display_name && user.display_name !== "User" ? user.display_name : "User";
+      setMemory(loadStoredMemory(currentUid, defName));
+      setFirestoreError(null);
+    }
+  }, [currentUid, user?.display_name, loadChatsFromFirestore]);
+
+  // Initial Firestore load for authenticated users on first mount
+  useEffect(() => {
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      loadChatsFromFirestore(currentUid);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh chat list when tab regains focus
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && isAuthenticated && currentUid && currentUid !== "guest") {
+        loadChatsFromFirestore(currentUid);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [isAuthenticated, currentUid, loadChatsFromFirestore]);
+
+  // Sync memory to user-namespaced localStorage (memory is still localStorage, not Firestore)
   useEffect(() => {
     if (!currentUid) return;
     try {
@@ -296,25 +498,22 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch {}
   }, [memory, currentUid]);
 
-  // Sync chats to user-namespaced storage
+  // Sync guest chats to localStorage
   useEffect(() => {
-    if (!currentUid) return;
-    try {
-      localStorage.setItem(getChatsStorageKey(currentUid), JSON.stringify(chats));
-    } catch {}
+    if (currentUid === "guest") {
+      saveGuestChats(chats);
+    }
   }, [chats, currentUid]);
 
-  // Sync activeChatId to user-namespaced storage
+  // Load messages when active chat changes (for Firestore-backed chats)
   useEffect(() => {
-    if (!currentUid) return;
-    try {
-      if (activeChatId) {
-        localStorage.setItem(getActiveChatIdKey(currentUid), activeChatId);
-      } else {
-        localStorage.removeItem(getActiveChatIdKey(currentUid));
+    if (activeChatId && isAuthenticated && currentUid && currentUid !== "guest") {
+      const chat = chats.find((c) => c.id === activeChatId);
+      if (chat && !chat._messagesLoaded) {
+        loadMessagesForChat(currentUid, activeChatId);
       }
-    } catch {}
-  }, [activeChatId, currentUid]);
+    }
+  }, [activeChatId, isAuthenticated, currentUid, chats, loadMessagesForChat]);
 
   // Multi-tab synchronization via BroadcastChannel and storage events
   useEffect(() => {
@@ -330,9 +529,20 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const targetUid = uid !== undefined ? uid : null;
       if (targetUid !== activeUidRef.current) {
         activeUidRef.current = targetUid;
-        const loaded = loadStoredChats(targetUid);
-        setChats(loaded);
-        setActiveChatId(loaded[0]?.id || null);
+        if (targetUid && targetUid !== "guest") {
+          loadChatsFromFirestore(targetUid);
+        } else if (targetUid === "guest") {
+          const loaded = loadGuestChats();
+          setChats(loaded);
+          setActiveChatId(loaded[0]?.id || null);
+        } else {
+          // Logged out in another tab → clear in-memory only
+          const fresh = createEmptyChat();
+          setChats([fresh]);
+          setActiveChatId(fresh.id);
+          loadedChatIdsRef.current = new Set();
+          savedMsgIdsRef.current = new Set();
+        }
         setMemory(loadStoredMemory(targetUid, "User"));
       }
     };
@@ -372,9 +582,13 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       window.removeEventListener("storage", handleStorage);
     };
-  }, []);
+  }, [loadChatsFromFirestore]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
+
+  // -----------------------------------------------------------------------
+  // Chat CRUD operations
+  // -----------------------------------------------------------------------
 
   const createNewChat = (): string => {
     const freshChat = createEmptyChat();
@@ -401,23 +615,42 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       return remaining;
     });
+    // Background Firestore delete
+    if (isAuthenticated && currentUid) {
+      dbDeleteOneChat(currentUid, id).catch((err) => {
+        console.error("[AUTONEXIS DB] Failed to delete chat:", err);
+      });
+    }
   };
 
   const renameChat = (id: string, newTitle: string) => {
+    const title = newTitle.trim();
+    if (!title) return;
     setChats((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, title: newTitle.trim() || c.title } : c))
+      prev.map((c) => (c.id === id ? { ...c, title } : c))
     );
+    // Background Firestore update
+    if (isAuthenticated && currentUid) {
+      dbUpdateChatTitle(currentUid, id, title).catch((err) => {
+        console.error("[AUTONEXIS DB] Failed to rename chat:", err);
+      });
+    }
   };
 
   const clearAllChats = () => {
     const freshChat = createEmptyChat();
     setChats([freshChat]);
     setActiveChatId(freshChat.id);
-    if (currentUid) {
-      try {
-        localStorage.setItem(getChatsStorageKey(currentUid), JSON.stringify([freshChat]));
-        localStorage.setItem(getActiveChatIdKey(currentUid), freshChat.id);
-      } catch {}
+    loadedChatIdsRef.current = new Set();
+    savedMsgIdsRef.current = new Set();
+    // Background Firestore delete all
+    if (isAuthenticated && currentUid) {
+      dbDeleteAllChats(currentUid).catch((err) => {
+        console.error("[AUTONEXIS DB] Failed to delete all chats:", err);
+      });
+    }
+    if (currentUid === "guest") {
+      saveGuestChats([freshChat]);
     }
   };
 
@@ -448,13 +681,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
-  // Robust Helper to extract user name or facts from user's message
+  // -----------------------------------------------------------------------
+  // Memory extraction
+  // -----------------------------------------------------------------------
   const extractUserMemory = (text: string): { extractedName?: string; newFact?: string } => {
     const clean = text.trim();
     let extractedName: string | undefined = undefined;
     let newFact: string | undefined = undefined;
 
-    // 1. Name patterns covering English, Hindi, and Hinglish variants
     const namePatterns = [
       /(?:mera|apna|my)\s+(?:naam|name|nam)\s+([A-Za-z\u0900-\u097F]+)/i,
       /(?:mujhe|call me|ap mujhe)\s+([A-Za-z\u0900-\u097F]+)\s+(?:kaho|bolo|bulana|bolna|kehna)/i,
@@ -464,7 +698,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ];
 
     const disallowedWords = new Set([
-      "a", "an", "the", "fine", "good", "sad", "dukhi", "khush", "happy", "here", 
+      "a", "an", "the", "fine", "good", "sad", "dukhi", "khush", "happy", "here",
       "ek", "nahi", "kya", "theek", "kaise", "batao", "kaun", "kuchh", "kuch",
       "bhi", "yeh", "woh", "sir", "madam", "ai", "bot", "assistant", "autonexis", "friend"
     ]);
@@ -493,7 +727,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updateProfileName(extractedName);
     }
 
-    // 2. City / location patterns
     const cityMatch = clean.match(/(?:rehta hu|living in|from|live in)\s+([A-Za-z\u0900-\u097F]+)/i);
     if (cityMatch && cityMatch[1]) {
       const city = cityMatch[1].trim();
@@ -514,7 +747,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
-    // 3. Likes patterns
     const likesMatch = clean.match(/(?:mujhe|i like|i love)\s+([^,.]+?)\s+(?:pasand hai|accha lagta hai)/i);
     if (likesMatch && likesMatch[1]) {
       newFact = `Likes: ${likesMatch[1].trim()}`;
@@ -535,6 +767,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { extractedName, newFact };
   };
 
+  // -----------------------------------------------------------------------
+  // sendMessage — core chat + streaming logic
+  // -----------------------------------------------------------------------
   const sendMessage = async (
     content: string,
     mode: "chat" | "image" | "video" | "voice" = "chat",
@@ -559,17 +794,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       targetChatId = createNewChat();
     }
 
-    // Check if message is an image generation request
     const isImageRequest =
       mode === "image" ||
       /(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)|(?:photo|image|tasveer|chhavi)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
 
-    // Check if message is a video generation request
     const isVideoRequest =
       mode === "video" ||
       /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation|cinematic)|(?:video)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
 
-    // Immediately extract memory from user message
     const { extractedName, newFact } = extractUserMemory(trimmed);
 
     const attachedImages = attachment?.type === "image"
@@ -595,7 +827,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const currentChat = chats.find((c) => c.id === targetChatId);
     const isFirst = !currentChat || currentChat.messages.length === 0;
     const words = (trimmed || fileLabel).split(" ");
-    const autoTitle = isFirst ? (words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")) : currentChat.title;
+    const autoTitle = isFirst ? (words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")) : currentChat!.title;
 
     setChats((prev) =>
       prev.map((c) => {
@@ -603,8 +835,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return {
             ...c,
             title: autoTitle,
-            updated_at: "Just now",
+            updated_at: new Date().toISOString(),
             messages: [...c.messages, userMsg],
+            _messagesLoaded: true,
           };
         }
         return c;
@@ -619,6 +852,21 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       try {
         localStorage.setItem(GUEST_MSG_COUNT_KEY, nextCount.toString());
       } catch {}
+    }
+
+    // Save user message to Firestore immediately (fire-and-forget)
+    const capturedChatId = targetChatId;
+    if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(userMsg.id)) {
+      savedMsgIdsRef.current.add(userMsg.id);
+      backgroundSave(
+        {
+          uid: currentUid,
+          chatId: capturedChatId,
+          title: autoTitle,
+          messages: [{ id: userMsg.id, role: userMsg.role, content: userMsg.content }],
+        },
+        setFirestoreError
+      );
     }
 
     if (isImageRequest) {
@@ -643,16 +891,27 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         setChats((prev) =>
           prev.map((c) => {
-            if (c.id === targetChatId) {
-              return {
-                ...c,
-                messages: [...c.messages, assistantMsg],
-              };
+            if (c.id === capturedChatId) {
+              return { ...c, messages: [...c.messages, assistantMsg] };
             }
             return c;
           })
         );
         setIsSending(false);
+
+        // Save assistant message to Firestore
+        if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
+          savedMsgIdsRef.current.add(assistantMsg.id);
+          backgroundSave(
+            {
+              uid: currentUid,
+              chatId: capturedChatId,
+              title: autoTitle,
+              messages: [{ id: assistantMsg.id, role: assistantMsg.role, content: assistantMsg.content }],
+            },
+            setFirestoreError
+          );
+        }
       }, 1000);
       return;
     }
@@ -676,38 +935,48 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         setChats((prev) =>
           prev.map((c) => {
-            if (c.id === targetChatId) {
-              return {
-                ...c,
-                messages: [...c.messages, assistantMsg],
-              };
+            if (c.id === capturedChatId) {
+              return { ...c, messages: [...c.messages, assistantMsg] };
             }
             return c;
           })
         );
         setIsSending(false);
+
+        // Save assistant message to Firestore
+        if (isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
+          savedMsgIdsRef.current.add(assistantMsg.id);
+          backgroundSave(
+            {
+              uid: currentUid,
+              chatId: capturedChatId,
+              title: autoTitle,
+              messages: [{ id: assistantMsg.id, role: assistantMsg.role, content: assistantMsg.content }],
+            },
+            setFirestoreError
+          );
+        }
       }, 1200);
       return;
     }
 
-    // Build immediate, non-stale memory context string
+    // -----------------------------------------------------------------------
+    // LLM request with streaming
+    // -----------------------------------------------------------------------
     const effectiveUserName =
       extractedName ||
       memory.userName ||
       (user?.display_name && user?.display_name !== "User" ? user.display_name : "User");
 
-    // Gather facts from current memory and scan across all past chats
     const pastFacts = extractAllFactsFromChats(chats);
     const combinedFactsSet = new Set([...memory.facts, ...pastFacts]);
     if (newFact) combinedFactsSet.add(newFact);
     const allFacts = Array.from(combinedFactsSet);
 
-    // Build rich cross-chat memory recap from all other conversations
     const crossChatContext = getCrossChatMemoryContext(chats, targetChatId);
 
     let memoryPrompt = `User's Name: ${effectiveUserName}.\n`;
 
-    // Strict Language Mirroring Detection
     const hasDevanagari = /[\u0900-\u097F]/.test(trimmed);
     const hinglishMarkers = [
       "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
@@ -733,13 +1002,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       memoryPrompt += `CRITICAL INSTRUCTION: The user has just explicitly requested/instructed you to address them as "${extractedName}" (message: "${trimmed}"). You MUST immediately, warmly, and enthusiastically accept this and call them "${extractedName}". NEVER argue, refuse, or say Google or system prevents you.\n`;
     }
 
-    // Detect if user asks what their name is
     const asksForName = /(?:mera|apna)\s+(?:naam|name|nam)\s+(?:kya|batao)|what(?:\s+is|\s*'s)\s+my\s+name|who\s+am\s+i/i.test(trimmed);
     if (asksForName) {
       memoryPrompt += `CRITICAL INSTRUCTION: The user is explicitly asking for their name ("${trimmed}"). Their remembered name is "${effectiveUserName}". Answer them directly, warmly, and accurately that their name is "${effectiveUserName}".\n`;
     }
 
-    // Detect if user asks about past chats / previous conversations
     const asksAboutPastChats = /(?:pehle|pichli|purani|previous|earlier|last)\s+(?:baat|chat|conversation|cheto|chizo|kya\s+baat)|tujhe\s+yaad\s+hai|kya\s+yaad\s+hai|do\s+you\s+remember/i.test(trimmed);
     if (asksAboutPastChats) {
       memoryPrompt += `\nCRITICAL DIRECTIVE: The user is explicitly asking about their past conversations ("${trimmed}"). You MUST review the past conversations listed below and summarize clearly, warmly, and accurately what they discussed with you in previous chats. Never claim you forgot or cannot see past chats.\n`;
@@ -784,7 +1051,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ...c.messages,
               {
                 id: assistantMsgId,
-                role: "assistant",
+                role: "assistant" as const,
                 content: "",
                 created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
               },
@@ -805,7 +1072,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // -----------------------------------------------------------------------
     // Adaptive Smoothing Buffer via requestAnimationFrame
-    // Calms big bursts into smooth 60-120 cps typing without lagging behind
     // -----------------------------------------------------------------------
     let pendingBuffer = "";
     let displayedBuffer = "";
@@ -829,7 +1095,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       displayedBuffer = text;
       setChats((prev) =>
         prev.map((c) => {
-          if (c.id === targetChatId) {
+          if (c.id === capturedChatId) {
             return {
               ...c,
               messages: c.messages.map((m) =>
@@ -842,9 +1108,29 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
     };
 
+    // Save assistant reply to Firestore ONCE after stream finishes
+    const saveAssistantReply = (finalContent: string) => {
+      if (isAuthenticated && requestUid && requestUid !== "guest" && !savedMsgIdsRef.current.has(assistantMsgId)) {
+        savedMsgIdsRef.current.add(assistantMsgId);
+        backgroundSave(
+          {
+            uid: requestUid,
+            chatId: capturedChatId,
+            title: autoTitle,
+            messages: [{ id: assistantMsgId, role: "assistant", content: finalContent }],
+          },
+          setFirestoreError
+        );
+      }
+    };
+
     const pumpAnimation = (now: number) => {
       if (activeUidRef.current !== requestUid || controller.signal.aborted) {
         stopAnimation();
+        // Save whatever we have so far if stream was interrupted
+        if (displayedBuffer) {
+          saveAssistantReply(displayedBuffer);
+        }
         setIsSending(false);
         return;
       }
@@ -857,27 +1143,26 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (remainingChars === 0) {
         if (isStreamDone) {
           stopAnimation();
+          // Save final content to Firestore
+          saveAssistantReply(displayedBuffer);
           setIsSending(false);
           return;
         }
-        // Await next incoming network packet
         animFrameId = requestAnimationFrame(pumpAnimation);
         return;
       }
 
-      // Adaptive speed calculation
       let charsPerSec: number;
       if (isStreamDone) {
-        // Network finished: flush rest quickly over ~150-250ms
         charsPerSec = Math.max(280, remainingChars * 4);
       } else if (remainingChars < 25) {
-        charsPerSec = 75; // Calm, human typing speed
+        charsPerSec = 75;
       } else if (remainingChars < 75) {
         charsPerSec = 110;
       } else if (remainingChars < 160) {
         charsPerSec = 200;
       } else {
-        charsPerSec = Math.min(500, remainingChars * 3); // Catch up if network sent big burst
+        charsPerSec = Math.min(500, remainingChars * 3);
       }
 
       const count = Math.max(1, Math.round((charsPerSec * deltaMs) / 1000));
@@ -916,12 +1201,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         () => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
             stopAnimation();
+            if (displayedBuffer) saveAssistantReply(displayedBuffer);
             setIsSending(false);
             return;
           }
           isStreamDone = true;
           if (prefersReducedMotion || pendingBuffer.length === 0) {
             stopAnimation();
+            saveAssistantReply(displayedBuffer);
             setIsSending(false);
           }
         },
@@ -929,6 +1216,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         async () => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
             stopAnimation();
+            if (displayedBuffer) saveAssistantReply(displayedBuffer);
             setIsSending(false);
             return;
           }
@@ -939,7 +1227,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 return;
               }
               flushDisplay(reply);
+              saveAssistantReply(reply);
             } catch {}
+          } else {
+            saveAssistantReply(displayedBuffer);
           }
           stopAnimation();
           setIsSending(false);
@@ -949,6 +1240,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
     } catch {
       stopAnimation();
+      if (displayedBuffer) saveAssistantReply(displayedBuffer);
       setIsSending(false);
     }
   };
@@ -973,6 +1265,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         guestMessagesRemaining,
         showGuestLimitModal,
         setShowGuestLimitModal,
+        loadMoreChats,
+        hasMoreChats,
+        firestoreError,
       }}
     >
       {children}
