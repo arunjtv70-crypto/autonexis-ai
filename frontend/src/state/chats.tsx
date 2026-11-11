@@ -108,6 +108,13 @@ export interface UserMemoryStore {
   facts: string[];
 }
 
+export interface VoiceTurnCallbacks {
+  signal: AbortSignal;
+  onToken: (token: string) => void;
+  onRateLimited?: (message: string) => void;
+  chatIdOverride?: string | null;
+}
+
 export interface ChatsContextType {
   chats: ChatItem[];
   activeChatId: string | null;
@@ -192,6 +199,10 @@ export interface ChatsContextType {
     mode?: "chat" | "image" | "video" | "voice",
     attachment?: AttachmentPayload | null
   ) => Promise<void>;
+  runVoiceCallTurn: (
+    spokenText: string,
+    callbacks: VoiceTurnCallbacks
+  ) => Promise<{ chatId: string; fullText: string; rateLimited?: boolean }>;
   isSending: boolean;
   guestMsgCount: number;
   guestMessagesRemaining: number;
@@ -458,7 +469,12 @@ type PendingSave = {
   uid: string;
   chatId: string;
   title: string;
-  messages: Array<{ id: string; role: "user" | "assistant"; content: string }>;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    mediaType?: "text" | "image" | "video" | "voice";
+  }>;
   projectId?: string | null;
   retries?: number;
 };
@@ -640,6 +656,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const initial = currentUid === "guest" ? loadGuestChats() : [createEmptyChat()];
     return initial[0]?.id || null;
   });
+  const chatsRef = useRef<ChatItem[]>(chats);
+  chatsRef.current = chats;
+  const activeChatIdRef = useRef<string | null>(activeChatId);
+  activeChatIdRef.current = activeChatId;
   const [isSending, setIsSending] = useState(false);
 
   // Firestore pagination state
@@ -703,6 +723,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             id: m.id,
             role: m.role,
             content: m.content,
+            mediaType: m.mediaType || undefined,
             created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           }));
           loadedChatIdsRef.current.add(defaultActive.id);
@@ -770,6 +791,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         id: m.id,
         role: m.role,
         content: m.content,
+        mediaType: m.mediaType || undefined,
         created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       }));
       loadedChatIdsRef.current.add(chatId);
@@ -1654,6 +1676,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setMemories([]);
     setLastExtractedMemory(null);
+    resetMemory();
   };
 
   const undoLastMemory = async () => {
@@ -2574,6 +2597,257 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   };
 
+  // -----------------------------------------------------------------------
+  // Voice Call Turn — streams low-latency voice reply & persists with "Voice" tag
+  // -----------------------------------------------------------------------
+  const runVoiceCallTurn = async (
+    spokenText: string,
+    callbacks: VoiceTurnCallbacks
+  ): Promise<{ chatId: string; fullText: string; rateLimited?: boolean }> => {
+    const trimmed = spokenText.trim();
+    const fallbackChatId = callbacks.chatIdOverride || activeChatIdRef.current || "";
+    if (!trimmed || isGuest) {
+      return { chatId: fallbackChatId, fullText: "" };
+    }
+
+    let targetChatId = callbacks.chatIdOverride || activeChatIdRef.current;
+    if (!targetChatId || !chatsRef.current.some((c) => c.id === targetChatId)) {
+      targetChatId = createNewChat();
+      activeChatIdRef.current = targetChatId;
+    }
+
+    const requestUid = currentUid;
+    const currentChat = chatsRef.current.find((c) => c.id === targetChatId);
+    const isTemp = isTemporaryChat || !!currentChat?._isTemporary;
+    const chatProjectId = currentChat?.projectId ?? null;
+    const isFirst = !currentChat || currentChat.messages.length === 0;
+    const words = trimmed.split(/\s+/);
+    const autoTitle = isFirst
+      ? words.slice(0, 6).join(" ") + (words.length > 6 ? "..." : "")
+      : currentChat!.title;
+
+    const { extractedName, newFact } = extractUserMemory(trimmed);
+    const userMsgId = `usr_v_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const assistantMsgId = `ast_v_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const timeLabel = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    const userMsg: MessageItem = {
+      id: userMsgId,
+      role: "user",
+      content: trimmed,
+      mediaType: "voice",
+      created_at: timeLabel,
+    };
+
+    const assistantPlaceholder: MessageItem = {
+      id: assistantMsgId,
+      role: "assistant",
+      content: "",
+      mediaType: "voice",
+      created_at: timeLabel,
+    };
+
+    const existingMsgs = currentChat?.messages || [];
+    const historyPayload: ChatMessagePayload[] = [
+      ...existingMsgs.map((m) => ({
+        role: m.role,
+        content: m.fullPayloadContent || m.content,
+      })),
+      { role: "user", content: trimmed },
+    ];
+
+    setChats((prev) => {
+      const updated = prev.map((c) =>
+        c.id === targetChatId
+          ? {
+              ...c,
+              title: autoTitle,
+              updated_at: new Date().toISOString(),
+              messages: [...c.messages, userMsg, assistantPlaceholder],
+              _messagesLoaded: true,
+            }
+          : c
+      );
+      chatsRef.current = updated;
+      return updated;
+    });
+
+    if (!isTemp && isAuthenticated && requestUid && !savedMsgIdsRef.current.has(userMsgId)) {
+      savedMsgIdsRef.current.add(userMsgId);
+      backgroundSave(
+        {
+          uid: requestUid,
+          chatId: targetChatId,
+          title: autoTitle,
+          projectId: chatProjectId,
+          messages: [{ id: userMsgId, role: "user", content: trimmed, mediaType: "voice" }],
+        },
+        setFirestoreError
+      );
+    }
+
+    const prefs = preferencesRef.current;
+    const memoryPrompt = buildMemoryPrompt(trimmed, targetChatId, extractedName, newFact, isTemp);
+    const memoryAllowed = !isTemp && prefs.memoryEnabled !== false;
+    const userContext = {
+      nickname: prefs.nickname || undefined,
+      user_role: prefs.userRole || undefined,
+      preferences: prefs.customInstructions || undefined,
+      response_style: prefs.responseStyle || "Default",
+      language: prefs.language || "Auto",
+      voice_language: prefs.voiceLanguage || prefs.micLanguage || "en-IN",
+      mic_language: prefs.micLanguage || "en-IN",
+      memories: memoryAllowed
+        ? memories.slice(0, 15).map((m) => ({ id: m.id, text: m.text }))
+        : [],
+      web_search: isWebSearchActive,
+    };
+
+    const relevantPastChats =
+      !isTemp && prefs.referencePastChats !== false
+        ? selectRelevantPastChats(chatsRef.current, targetChatId, trimmed)
+        : undefined;
+
+    const activeStyle =
+      !isTemp && prefs.activeCustomStyleId
+        ? (prefs.customStyles || []).find((s) => s.id === prefs.activeCustomStyleId)
+        : undefined;
+    const customStylePayload = activeStyle
+      ? { name: activeStyle.name, description: activeStyle.description }
+      : undefined;
+
+    const projectContext = await resolveProjectContext(chatProjectId, trimmed);
+
+    let rawAccumulated = "";
+    let rateLimitedHit = false;
+
+    const cleanForChatDisplay = (raw: string) =>
+      raw.replace(/\s*\[CHAT_CONTENT\]\s*/g, "\n\n").trim();
+
+    const updateAssistantText = (rawText: string) => {
+      const chatText = cleanForChatDisplay(rawText);
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === targetChatId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: chatText } : m
+                ),
+              }
+            : c
+        )
+      );
+    };
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      streamChatMessage(
+        historyPayload,
+        memoryPrompt,
+        userContext,
+        (chunk) => {
+          if (callbacks.signal.aborted || activeUidRef.current !== requestUid) {
+            finish();
+            return;
+          }
+          rawAccumulated += chunk;
+          callbacks.onToken(chunk);
+          updateAssistantText(rawAccumulated);
+        },
+        () => {
+          finish();
+        },
+        (err) => {
+          if (err?.rateLimited) {
+            rateLimitedHit = true;
+            callbacks.onRateLimited?.(err?.message || "Voice is busy, please try again shortly");
+          }
+          finish();
+        },
+        false,
+        callbacks.signal,
+        projectContext,
+        relevantPastChats,
+        customStylePayload,
+        true
+      ).then(finish).catch(finish);
+    });
+
+    const finalChatText = cleanForChatDisplay(rawAccumulated);
+    if (finalChatText) {
+      updateAssistantText(rawAccumulated);
+      if (
+        !isTemp &&
+        isAuthenticated &&
+        requestUid &&
+        !savedMsgIdsRef.current.has(assistantMsgId)
+      ) {
+        savedMsgIdsRef.current.add(assistantMsgId);
+        backgroundSave(
+          {
+            uid: requestUid,
+            chatId: targetChatId,
+            title: autoTitle,
+            projectId: chatProjectId,
+            messages: [
+              {
+                id: assistantMsgId,
+                role: "assistant",
+                content: finalChatText,
+                mediaType: "voice",
+              },
+            ],
+          },
+          setFirestoreError
+        );
+      }
+
+      if (!isTemp && prefs.memoryEnabled !== false && trimmed.length >= 15 && requestUid) {
+        userMessagesCountRef.current += 1;
+        if (userMessagesCountRef.current >= 3) {
+          userMessagesCountRef.current = 0;
+          extractMemoriesApi(
+            [...historyPayload.slice(-4), { role: "assistant", content: finalChatText }],
+            memories.map((m) => ({ id: m.id, text: m.text })),
+            false
+          )
+            .then(async (changes) => {
+              for (const change of changes) {
+                if (change.action === "add" && change.text) {
+                  const saved = await saveUserMemory(requestUid, change.text);
+                  setMemories((prev) => [saved, ...prev.filter((m) => m.id !== saved.id)]);
+                  setLastExtractedMemory({ id: saved.id, text: saved.text });
+                } else if (change.action === "update" && change.text && change.target_id) {
+                  const saved = await saveUserMemory(requestUid, change.text, change.target_id);
+                  setMemories((prev) => prev.map((m) => (m.id === change.target_id ? saved : m)));
+                  setLastExtractedMemory({ id: saved.id, text: saved.text });
+                }
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    } else if (!rateLimitedHit) {
+      // Remove empty assistant placeholder if aborted before any token
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === targetChatId
+            ? { ...c, messages: c.messages.filter((m) => m.id !== assistantMsgId) }
+            : c
+        )
+      );
+    }
+
+    return { chatId: targetChatId, fullText: finalChatText, rateLimited: rateLimitedHit };
+  };
+
   return (
     <ChatsContext.Provider
       value={{
@@ -2629,6 +2903,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isWebSearchActive,
         setIsWebSearchActive,
         sendMessage,
+        runVoiceCallTurn,
         isSending,
         guestMsgCount,
         guestMessagesRemaining,

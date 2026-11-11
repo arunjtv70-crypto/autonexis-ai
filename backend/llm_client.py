@@ -15,6 +15,7 @@ from prompts import (
     MEMORY_EXTRACTION_SYSTEM_PROMPT,
     ATTACHED_FILE_SAFETY_PROMPT,
     STYLE_ANALYSIS_SYSTEM_PROMPT,
+    VOICE_PROMPT,
     format_user_context_block,
     format_project_context_block,
     format_past_chats_context_block,
@@ -27,6 +28,72 @@ logging.basicConfig(level=logging.INFO)
 
 FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
 VISION_ERROR_MESSAGE = "I couldn't read this image. Please try a smaller or clearer one."
+
+WEB_SEARCH_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the live web for current news, facts, weather, prices, dates, or real-time information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Concise search query",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+_SEARCH_INTENT_RE = re.compile(
+    r"\b(latest|news|today|weather|forecast|temperature|price|stock|score|match|winner|current|released|happened|update|search)\b",
+    re.I,
+)
+_CODE_OR_TABLE_RE = re.compile(
+    r"\b(code|script|function|program|class|sql|html|css|python|javascript|typescript|table|compare|comparison|chart|matrix|document|article|essay)\b",
+    re.I,
+)
+
+
+def _get_tavily_key() -> str:
+    return (os.environ.get("TAVILY_API_KEY") or getattr(settings, "tavily_api_key", "") or "").strip()
+
+
+async def execute_web_search(query: str) -> str:
+    api_key = _get_tavily_key()
+    if not api_key:
+        return "Web search is not configured right now."
+    clean_q = (query or "").strip()[:300]
+    if not clean_q:
+        return "Empty search query."
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            res = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": clean_q,
+                    "search_depth": "basic",
+                    "max_results": 4,
+                    "include_answer": True,
+                },
+            )
+            if res.status_code != 200:
+                return "Web search temporarily unavailable."
+            data = res.json()
+            answer = (data.get("answer") or "").strip()
+            snippets = []
+            for item in (data.get("results") or [])[:4]:
+                title = str(item.get("title") or "").strip()
+                content = str(item.get("content") or "").strip()[:240]
+                if content:
+                    snippets.append(f"{title}: {content}" if title else content)
+            combined = "\n".join(filter(None, [answer] + snippets))
+            return combined or "No relevant live web results found."
+    except Exception:
+        return "Web search request timed out."
 
 def has_attached_file_content(messages: List[Dict[str, Any]]) -> bool:
     """Checks if any message contains an attached file marker."""
@@ -172,7 +239,8 @@ class LLMClient:
         relevant_past_chats: Optional[List[Dict[str, Any]]] = None,
         custom_style: Optional[Dict[str, Any]] = None,
         max_history: int = 18,
-        is_math: bool = False
+        is_math: bool = False,
+        voice: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory,
@@ -183,8 +251,11 @@ class LLMClient:
         # Always include abuse & safety policy
         extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
 
-        # Always include mobile layout, headings, and table policy
-        extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
+        # Include voice live-call instructions when voice=True, otherwise mobile layout/table policy
+        if voice:
+            extra_system_context.append(VOICE_PROMPT)
+        else:
+            extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
 
         # Include user personalization context block (nickname, role, preferences, memories, styles)
         if user_context:
@@ -258,8 +329,29 @@ class LLMClient:
 
         # Dynamic Language Matching Directive
         if last_user_text:
-            lang_mandate = detect_language_directive(last_user_text)
-            extra_system_context.append(lang_mandate)
+            if voice:
+                has_dev = any('\u0900' <= c <= '\u097f' for c in last_user_text)
+                pref_lang = str((user_context or {}).get("voice_language") or (user_context or {}).get("mic_language") or "").lower()
+                words_set = set(w.lower().strip(".,!?:;\"'()[]{}") for w in last_user_text.split())
+                hinglish_markers = {
+                    "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
+                    "naam", "nam", "kaise", "kaisa", "kaisi", "batao", "bataiye", "bol", "bolo",
+                    "kaho", "kehna", "aaj", "kal", "yaar", "bhai", "dost", "thik", "theek",
+                    "nahi", "nahin", "mat", "karo", "karna", "acha", "achha", "accha", "bahut", "bohot",
+                    "samajh", "chahiye", "kuch", "yeh", "ye", "woh", "wo", "apna", "aap", "tum", "kyu", "kyun",
+                }
+                if has_dev or any(w in hinglish_markers for w in words_set) or pref_lang.startswith("hi"):
+                    extra_system_context.append(
+                        "VOICE LANGUAGE MANDATE: The user spoke in Hindi or Hinglish. Reply warmly in spoken Hindi/Hinglish: "
+                        "write Hindi words in Devanagari script and keep English words/terms in Latin letters so speech synthesis pronounces them naturally."
+                    )
+                else:
+                    extra_system_context.append(
+                        "VOICE LANGUAGE MANDATE: The user spoke in English. Reply completely in natural spoken English."
+                    )
+            else:
+                lang_mandate = detect_language_directive(last_user_text)
+                extra_system_context.append(lang_mandate)
 
         full_system = self.system_prompt
         if extra_system_context:
@@ -322,11 +414,12 @@ class LLMClient:
         project_context: Optional[Dict[str, Any]] = None,
         relevant_past_chats: Optional[List[Dict[str, Any]]] = None,
         custom_style: Optional[Dict[str, Any]] = None,
-        is_guest: bool = False
+        is_guest: bool = False,
+        voice: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         Streams completion tokens as Server-Sent Events (SSE) data chunks.
-        For mathematical inquiries, resolves exact_math tools with high precision before streaming.
+        For mathematical or live web search inquiries, resolves tool calls before streaming.
         Applies backend profanity safeguard to guarantee no profanity ever reaches the user.
         """
         endpoint = f"{self.base_url}/chat/completions"
@@ -337,14 +430,25 @@ class LLMClient:
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
-        fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
         last_user_text = get_last_user_text(messages)
+        fallback_error_msg = (
+            "Voice is busy, please try again shortly"
+            if voice
+            else (VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE)
+        )
+
+        has_tavily = bool(_get_tavily_key())
+        web_search_requested = bool(user_context and user_context.get("web_search"))
+        use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
+        needs_tool_loop = is_math or use_web_tool
+
+        voice_max_tokens = 340 if _CODE_OR_TABLE_RE.search(last_user_text or "") else 250
 
         # -------------------------------------------------------------------
-        # MATH ROUTE: Multi-turn exact calculation tool loop (up to 10 turns)
+        # TOOL ROUTE: Exact Math & Optional Web Search (keeps voice concise)
         # -------------------------------------------------------------------
-        if is_math:
-            max_tokens = 512 if is_guest else 3000
+        if needs_tool_loop:
+            max_tokens = voice_max_tokens if voice else (512 if is_guest else 3000)
             conversation = self._prepare_messages(
                 messages,
                 user_memory,
@@ -352,27 +456,38 @@ class LLMClient:
                 project_context=project_context,
                 relevant_past_chats=relevant_past_chats,
                 custom_style=custom_style,
-                is_math=True,
+                is_math=is_math,
+                voice=voice,
             )
-            tools = [EXACT_MATH_TOOL_DEFINITION]
+            tools = []
+            if is_math:
+                tools.append(EXACT_MATH_TOOL_DEFINITION)
+            if use_web_tool:
+                tools.append(WEB_SEARCH_TOOL_DEFINITION)
 
             try:
                 timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     final_content = ""
-                    for turn in range(10):
+                    max_turns = 4 if voice else 10
+                    for _ in range(max_turns):
                         payload = {
                             "model": active_model,
                             "messages": conversation,
                             "tools": tools,
                             "tool_choice": "auto",
-                            "temperature": 0.2,
+                            "temperature": 0.2 if is_math else 0.5,
                             "max_tokens": max_tokens,
                             "stream": False,
                         }
                         res = await client.post(endpoint, json=payload, headers=headers)
+                        if res.status_code == 429:
+                            busy_msg = "Voice is busy, please try again shortly" if voice else FRIENDLY_ERROR_MESSAGE
+                            yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': busy_msg}, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
                         if res.status_code != 200:
-                            logger.error(f"[AUTONEXIS LLM MATH ERROR] {res.status_code}: {res.text}")
+                            logger.error(f"[AUTONEXIS LLM TOOL ERROR] Status {res.status_code}")
                             yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -391,9 +506,10 @@ class LLMClient:
                             args_str = tc.get("function", {}).get("arguments", "{}")
                             try:
                                 args = json.loads(args_str)
-                                expr = args.get("expression", "")
                                 if fn_name == "exact_math":
-                                    result_str = execute_exact_math(expr)
+                                    result_str = execute_exact_math(args.get("expression", ""))
+                                elif fn_name == "web_search":
+                                    result_str = await execute_web_search(args.get("query", ""))
                                 else:
                                     result_str = f"Error: Unknown tool '{fn_name}'"
                             except Exception as parse_err:
@@ -412,18 +528,20 @@ class LLMClient:
                         conversation, final_content, last_user_text, max_tokens
                     )
 
-                    # Stream text in smooth chunks to client
-                    chunk_size = 8
-                    for i in range(0, len(clean_content), chunk_size):
-                        sub_str = clean_content[i:i + chunk_size]
-                        yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.008)
+                    if voice:
+                        yield f"data: {json.dumps({'content': clean_content}, ensure_ascii=False)}\n\n"
+                    else:
+                        chunk_size = 8
+                        for i in range(0, len(clean_content), chunk_size):
+                            sub_str = clean_content[i:i + chunk_size]
+                            yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
+                            await asyncio.sleep(0.008)
 
                     yield "data: [DONE]\n\n"
                     return
 
             except Exception as e:
-                logger.error(f"[AUTONEXIS LLM MATH EXCEPTION] {e}")
+                logger.error(f"[AUTONEXIS LLM TOOL EXCEPTION] {type(e).__name__}")
                 yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
                 return
@@ -431,7 +549,7 @@ class LLMClient:
         # -------------------------------------------------------------------
         # GENERAL CHAT & VISION ROUTE: True Real-time SSE Token Streaming
         # -------------------------------------------------------------------
-        max_tokens = 512 if is_guest else 2048
+        max_tokens = voice_max_tokens if voice else (512 if is_guest else 2048)
         conversation = self._prepare_messages(
             messages,
             user_memory,
@@ -440,11 +558,12 @@ class LLMClient:
             relevant_past_chats=relevant_past_chats,
             custom_style=custom_style,
             is_math=False,
+            voice=voice,
         )
 
         # Optional Think Mode Self-Check for Images/Complex Reasoning
         enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
-        run_self_check = enable_self_check and not is_guest and is_vision
+        run_self_check = enable_self_check and not is_guest and not voice and is_vision
 
         if run_self_check:
             # First produce response, then run verification check
@@ -522,6 +641,12 @@ class LLMClient:
             timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                    if response.status_code == 429:
+                        await response.aread()
+                        busy_msg = "Voice is busy, please try again shortly" if voice else FRIENDLY_ERROR_MESSAGE
+                        yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': busy_msg}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
                     if response.status_code != 200:
                         error_body = await response.aread()
                         logger.error(f"[AUTONEXIS LLM STREAM ERROR] Status {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
@@ -548,7 +673,7 @@ class LLMClient:
 
                     yield "data: [DONE]\n\n"
         except Exception as e:
-            logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {e}")
+            logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {type(e).__name__}")
             yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -560,7 +685,8 @@ class LLMClient:
         project_context: Optional[Dict[str, Any]] = None,
         relevant_past_chats: Optional[List[Dict[str, Any]]] = None,
         custom_style: Optional[Dict[str, Any]] = None,
-        is_guest: bool = False
+        is_guest: bool = False,
+        voice: bool = False,
     ) -> Dict[str, str]:
         """
         Non-streaming completion fallback with profanity safeguard.
@@ -573,11 +699,21 @@ class LLMClient:
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
-        fallback_error_msg = VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE
         last_user_text = get_last_user_text(messages)
+        fallback_error_msg = (
+            "Voice is busy, please try again shortly"
+            if voice
+            else (VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE)
+        )
 
-        if is_math:
-            max_tokens = 512 if is_guest else 3000
+        has_tavily = bool(_get_tavily_key())
+        web_search_requested = bool(user_context and user_context.get("web_search"))
+        use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
+        needs_tool_loop = is_math or use_web_tool
+        voice_max_tokens = 340 if _CODE_OR_TABLE_RE.search(last_user_text or "") else 250
+
+        if needs_tool_loop:
+            max_tokens = voice_max_tokens if voice else (512 if is_guest else 3000)
             conversation = self._prepare_messages(
                 messages,
                 user_memory,
@@ -585,26 +721,31 @@ class LLMClient:
                 project_context=project_context,
                 relevant_past_chats=relevant_past_chats,
                 custom_style=custom_style,
-                is_math=True,
+                is_math=is_math,
+                voice=voice,
             )
-            tools = [EXACT_MATH_TOOL_DEFINITION]
+            tools = []
+            if is_math:
+                tools.append(EXACT_MATH_TOOL_DEFINITION)
+            if use_web_tool:
+                tools.append(WEB_SEARCH_TOOL_DEFINITION)
 
             try:
                 timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    for _ in range(10):
+                    for _ in range(4 if voice else 10):
                         payload = {
                             "model": active_model,
                             "messages": conversation,
                             "tools": tools,
                             "tool_choice": "auto",
-                            "temperature": 0.2,
+                            "temperature": 0.2 if is_math else 0.5,
                             "max_tokens": max_tokens,
                             "stream": False,
                         }
                         res = await client.post(endpoint, json=payload, headers=headers)
                         if res.status_code != 200:
-                            logger.error(f"[AUTONEXIS LLM MATH ERROR] {res.status_code}: {res.text}")
+                            logger.error(f"[AUTONEXIS LLM TOOL ERROR] Status {res.status_code}")
                             return {"reply": fallback_error_msg}
 
                         choice = res.json()["choices"][0]
@@ -624,9 +765,10 @@ class LLMClient:
                             args_str = tc.get("function", {}).get("arguments", "{}")
                             try:
                                 args = json.loads(args_str)
-                                expr = args.get("expression", "")
                                 if fn_name == "exact_math":
-                                    result_str = execute_exact_math(expr)
+                                    result_str = execute_exact_math(args.get("expression", ""))
+                                elif fn_name == "web_search":
+                                    result_str = await execute_web_search(args.get("query", ""))
                                 else:
                                     result_str = f"Error: Unknown tool '{fn_name}'"
                             except Exception as parse_err:
@@ -638,12 +780,12 @@ class LLMClient:
                                 "name": fn_name,
                                 "content": str(result_str)
                             })
-                    return {"reply": "Unable to complete calculation."}
+                    return {"reply": "Unable to complete request right now."}
             except Exception as e:
-                logger.error(f"[AUTONEXIS LLM MATH EXCEPTION] {e}")
+                logger.error(f"[AUTONEXIS LLM TOOL EXCEPTION] {type(e).__name__}")
                 return {"reply": fallback_error_msg}
 
-        max_tokens = 512 if is_guest else 2048
+        max_tokens = voice_max_tokens if voice else (512 if is_guest else 2048)
         conversation = self._prepare_messages(
             messages,
             user_memory,
@@ -652,6 +794,7 @@ class LLMClient:
             relevant_past_chats=relevant_past_chats,
             custom_style=custom_style,
             is_math=False,
+            voice=voice,
         )
         payload = {
             "model": active_model,

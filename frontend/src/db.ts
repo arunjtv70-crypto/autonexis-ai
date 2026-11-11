@@ -76,6 +76,7 @@ export interface FirestoreMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  mediaType?: "text" | "image" | "video" | "voice";
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +158,7 @@ export async function loadChatMessages(
       role: data.role || "user",
       content: data.content || "",
       createdAt: tsToISO(data.createdAt),
+      mediaType: data.mediaType || undefined,
     });
   });
   return messages;
@@ -174,7 +176,12 @@ export async function saveChatWithMessages(
   uid: string,
   chatId: string,
   title: string,
-  newMessages: Array<{ id: string; role: "user" | "assistant"; content: string }>,
+  newMessages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    mediaType?: "text" | "image" | "video" | "voice";
+  }>,
   extraMeta?: { projectId?: string | null; pinned?: boolean; archived?: boolean }
 ): Promise<void> {
   const batch = writeBatch(db());
@@ -197,11 +204,15 @@ export async function saveChatWithMessages(
   // Add messages
   for (const msg of newMessages) {
     const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msg.id);
-    batch.set(msgRef, {
+    const msgDoc: Record<string, any> = {
       role: msg.role,
       content: sanitizeContentForStorage(msg.content),
       createdAt: serverTimestamp(),
-    });
+    };
+    if (msg.mediaType) {
+      msgDoc.mediaType = msg.mediaType;
+    }
+    batch.set(msgRef, msgDoc);
   }
 
   await batch.commit();
@@ -361,6 +372,11 @@ export interface UserPreferences {
   voiceSpeed?: number;
   voiceLanguage?: string;
   micLanguage?: string;
+  voiceCallCaptions?: boolean;
+  voiceCallBargeIn?: boolean;
+  voiceCallSilenceSec?: 30 | 60 | 90;
+  voiceCallEndPauseMs?: 800 | 1000 | 1200;
+  voiceCallCloudTts?: boolean;
   enterToSend?: boolean;
   autoScroll?: boolean;
   showStarterPrompts?: boolean;
@@ -390,6 +406,11 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   voiceSpeed: 1.0,
   voiceLanguage: "en-IN",
   micLanguage: "en-IN",
+  voiceCallCaptions: true,
+  voiceCallBargeIn: true,
+  voiceCallSilenceSec: 60,
+  voiceCallEndPauseMs: 1000,
+  voiceCallCloudTts: false,
   enterToSend: true,
   autoScroll: true,
   showStarterPrompts: true,
@@ -429,6 +450,17 @@ export async function loadUserPreferences(uid: string): Promise<UserPreferences 
       voiceSpeed: typeof data.voiceSpeed === "number" ? data.voiceSpeed : 1.0,
       voiceLanguage: data.voiceLanguage || "en-IN",
       micLanguage: data.micLanguage || "en-IN",
+      voiceCallCaptions: data.voiceCallCaptions ?? true,
+      voiceCallBargeIn: data.voiceCallBargeIn ?? true,
+      voiceCallSilenceSec:
+        data.voiceCallSilenceSec === 30 || data.voiceCallSilenceSec === 90
+          ? data.voiceCallSilenceSec
+          : 60,
+      voiceCallEndPauseMs:
+        data.voiceCallEndPauseMs === 800 || data.voiceCallEndPauseMs === 1200
+          ? data.voiceCallEndPauseMs
+          : 1000,
+      voiceCallCloudTts: data.voiceCallCloudTts ?? false,
       enterToSend: data.enterToSend ?? true,
       autoScroll: data.autoScroll ?? true,
       showStarterPrompts: data.showStarterPrompts ?? true,

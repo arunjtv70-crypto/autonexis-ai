@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles/base.css";
 import { ThemeProvider } from "./state/theme";
+import { NavigationProvider } from "./state/navigation";
 import { AuthProvider } from "./state/auth";
 import { ChatsProvider } from "./state/chats";
 import { PwaProvider } from "./state/pwa";
@@ -56,13 +57,15 @@ if (rootElement) {
     <StrictMode>
       <ErrorBoundary>
         <ThemeProvider>
-          <PwaProvider>
-            <AuthProvider>
-              <ChatsProvider>
-                <App />
-              </ChatsProvider>
-            </AuthProvider>
-          </PwaProvider>
+          <NavigationProvider>
+            <PwaProvider>
+              <AuthProvider>
+                <ChatsProvider>
+                  <App />
+                </ChatsProvider>
+              </AuthProvider>
+            </PwaProvider>
+          </NavigationProvider>
         </ThemeProvider>
       </ErrorBoundary>
     </StrictMode>

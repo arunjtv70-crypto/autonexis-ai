@@ -338,3 +338,4 @@ export function translate(key: string, lang?: string): string {
     lang === "Hindi" || lang === "Hinglish" ? lang : "English";
   return TRANSLATIONS[target]?.[key] || TRANSLATIONS.English[key] || key;
 }
+

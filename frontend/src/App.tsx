@@ -1,11 +1,14 @@
 import React from "react";
 import { useAuth } from "./state/auth";
+import { useAppNavigation } from "./state/navigation";
 import { AuthScreen } from "./screens/AuthScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { Skeleton } from "./components/Skeleton";
+import { NotFoundScreen } from "./components/NotFoundScreen";
 
 export const AppContent: React.FC = () => {
   const { isAuthScreenVisible, isLoading, user, isGuest } = useAuth();
+  const { route } = useAppNavigation();
 
   // Auth state resolution gate: do not render any chat until onAuthStateChanged has resolved
   if (isLoading) {
@@ -40,6 +43,10 @@ export const AppContent: React.FC = () => {
   // If Auth screen is requested or user is not logged in and not guest, show AuthScreen
   if (isAuthScreenVisible || (!user && !isGuest)) {
     return <AuthScreen />;
+  }
+
+  if (route.isNotFound) {
+    return <NotFoundScreen />;
   }
 
   return <ChatScreen />;

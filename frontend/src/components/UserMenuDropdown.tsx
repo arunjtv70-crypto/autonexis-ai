@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   IconSettings,
   IconLogout,
@@ -38,10 +39,11 @@ export type SettingsSubView =
 interface UserMenuDropdownProps {
   isOpen: boolean;
   onClose: () => void;
+  anchorRef?: React.RefObject<HTMLElement | null>;
   userName?: string;
   userEmail: string;
   interfaceLanguage?: string;
-  onOpenSettings: (tab?: SettingsTabId, subView?: SettingsSubView) => void;
+  onOpenSettings: (tab?: SettingsTabId | null, subView?: SettingsSubView) => void;
   onLogout: () => void | Promise<void>;
   showInstallOption?: boolean;
   onInstallPwa?: () => void;
@@ -50,6 +52,7 @@ interface UserMenuDropdownProps {
 export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
   isOpen,
   onClose,
+  anchorRef,
   userName,
   userEmail,
   interfaceLanguage = "English",
@@ -61,6 +64,10 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
   const menuRef = useRef<HTMLDivElement>(null);
   const firstBtnRef = useRef<HTMLButtonElement>(null);
   const [learnMoreOpen, setLearnMoreOpen] = useState(false);
+  const [desktopPos, setDesktopPos] = useState<{ left: number; bottom: number }>({
+    left: 12,
+    bottom: 68,
+  });
 
   const t = (key: string) => translate(key, interfaceLanguage);
 
@@ -69,6 +76,19 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
       setLearnMoreOpen(false);
       return;
     }
+
+    const updatePosition = () => {
+      if (anchorRef?.current && window.innerWidth > 640) {
+        const rect = anchorRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          setDesktopPos({
+            left: Math.max(8, rect.left),
+            bottom: Math.max(12, window.innerHeight - rect.top + 8),
+          });
+        }
+      }
+    };
+    updatePosition();
 
     const focusTimer = window.setTimeout(() => {
       firstBtnRef.current?.focus();
@@ -81,36 +101,51 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
       }
     };
 
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
+    const handleOutsidePointerDown = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node;
+      if (menuRef.current && menuRef.current.contains(target)) return;
+      if (anchorRef?.current && anchorRef.current.contains(target)) return;
+      onClose();
     };
 
-    document.addEventListener("mousedown", handleOutsideClick);
+    window.addEventListener("resize", updatePosition);
+    document.addEventListener("pointerdown", handleOutsidePointerDown);
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       window.clearTimeout(focusTimer);
-      document.removeEventListener("mousedown", handleOutsideClick);
+      window.removeEventListener("resize", updatePosition);
+      document.removeEventListener("pointerdown", handleOutsidePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, anchorRef]);
 
-  if (!isOpen) return null;
+  if (!isOpen || typeof document === "undefined") return null;
 
-  const openTarget = (tab: SettingsTabId, subView: SettingsSubView = "main") => {
-    onClose();
+  const openTarget = (tab?: SettingsTabId | null, subView: SettingsSubView = "main") => {
     onOpenSettings(tab, subView);
   };
 
-  return (
-    <>
-      <div className="user-menu-mobile-backdrop" onClick={onClose} aria-hidden="true" />
+  const content = (
+    <div className="user-menu-portal-root" role="presentation">
+      <div
+        className="user-menu-mobile-backdrop"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        aria-hidden="true"
+      />
       <div
         className="user-menu-dropdown"
         ref={menuRef}
         role="menu"
         aria-label={t("secAccount")}
+        style={
+          {
+            "--menu-left": `${desktopPos.left}px`,
+            "--menu-bottom": `${desktopPos.bottom}px`,
+          } as React.CSSProperties
+        }
       >
         <div className="user-menu-sheet-handle" aria-hidden="true" />
 
@@ -126,7 +161,7 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
             type="button"
             role="menuitem"
             className="user-menu-item"
-            onClick={() => openTarget("account")}
+            onClick={() => openTarget(null, "main")}
           >
             <span className="user-menu-item-left">
               <IconSettings size={17} />
@@ -165,10 +200,7 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
               type="button"
               role="menuitem"
               className="user-menu-item"
-              onClick={() => {
-                onClose();
-                onInstallPwa();
-              }}
+              onClick={() => onInstallPwa()}
             >
               <span className="user-menu-item-left">
                 <IconSmartphone size={17} />
@@ -242,7 +274,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
             role="menuitem"
             className="user-menu-item user-menu-logout"
             onClick={() => {
-              onClose();
               onLogout();
             }}
           >
@@ -253,6 +284,8 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
           </button>
         </div>
       </div>
-    </>
+    </div>
   );
+
+  return createPortal(content, document.body);
 };

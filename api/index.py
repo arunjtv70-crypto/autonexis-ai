@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from auth_utils import get_current_user, security
 from llm_client import llm_client
-from routers import auth, chat
+from routers import auth, chat, voice
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,9 +46,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include Authentication & Chat Routers
+# Include Authentication, Chat & Voice Call Routers
 app.include_router(auth.router)
 app.include_router(chat.router)
+app.include_router(voice.router)
 
 class MessageItem(BaseModel):
     role: str = Field(..., description="Role of the sender (user, assistant)")
@@ -62,6 +63,7 @@ class DirectChatRequest(BaseModel):
     project_context: Optional[Dict[str, Any]] = None
     relevant_past_chats: Optional[List[Dict[str, Any]]] = None
     custom_style: Optional[Dict[str, Any]] = None
+    voice: bool = False
 
 class StyleCreateRequest(BaseModel):
     sample: str = Field(..., min_length=10, max_length=2000)
@@ -134,6 +136,11 @@ async def chat_direct(
     """Direct chat endpoint supporting both Authenticated Users and Guest sessions."""
     is_guest = request.headers.get("x-guest") == "1"
     if is_guest:
+        if req.voice:
+            raise HTTPException(
+                status_code=403,
+                detail="Log in to use voice calls."
+            )
         client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
         check_guest_rate_limit(client_ip)
 
@@ -173,7 +180,8 @@ async def chat_direct(
         project_context=req.project_context,
         relevant_past_chats=req.relevant_past_chats if not is_guest else None,
         custom_style=req.custom_style if not is_guest else None,
-        is_guest=is_guest
+        is_guest=is_guest,
+        voice=bool(req.voice),
     )
     return result
 
@@ -187,6 +195,11 @@ async def chat_stream_endpoint(
     """Real-time streaming chat endpoint supporting both Authenticated Users and Guest sessions."""
     is_guest = request.headers.get("x-guest") == "1"
     if is_guest:
+        if req.voice:
+            raise HTTPException(
+                status_code=403,
+                detail="Log in to use voice calls."
+            )
         client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
         check_guest_rate_limit(client_ip)
 
@@ -227,7 +240,8 @@ async def chat_stream_endpoint(
             project_context=req.project_context,
             relevant_past_chats=req.relevant_past_chats if not is_guest else None,
             custom_style=req.custom_style if not is_guest else None,
-            is_guest=is_guest
+            is_guest=is_guest,
+            voice=bool(req.voice),
         ),
         media_type="text/event-stream",
         headers={

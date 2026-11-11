@@ -38,10 +38,12 @@ import "./SettingsModal.css";
 
 interface SettingsModalProps {
   isOpen: boolean;
+  isExactList?: boolean;
+  activeTab: SettingsTabId;
+  subView: SettingsSubView;
+  onSelectSection: (tab: SettingsTabId, subView?: SettingsSubView) => void;
+  onBack: () => void;
   onClose: () => void;
-  initialTab?: SettingsTabId;
-  initialSubView?: SettingsSubView;
-  onTabChange?: (tab: SettingsTabId, subView?: SettingsSubView) => void;
 }
 
 interface SectionConfig {
@@ -52,8 +54,15 @@ interface SectionConfig {
   group: "main" | "extra";
 }
 
+interface SearchMatchEntry {
+  title: string;
+  section: SettingsTabId;
+  subView?: SettingsSubView;
+  keywords: string;
+}
+
 const SECTIONS: SectionConfig[] = [
-  { id: "account", labelKey: "secAccount", keywords: "profile name email login date logout", icon: <IconUser size={16} />, group: "main" },
+  { id: "account", labelKey: "secAccount", keywords: "profile name email login date logout sign", icon: <IconUser size={16} />, group: "main" },
   { id: "appearance", labelKey: "secAppearance", keywords: "theme dark light auto text size font density compact motion animation code wrap", icon: <IconPalette size={16} />, group: "main" },
   { id: "personalization", labelKey: "secPersonalization", keywords: "nickname role instructions about style hinglish hindi english reply language", icon: <IconSliders size={16} />, group: "main" },
   { id: "capabilities", labelKey: "secCapabilities", keywords: "memory past chats web search voice speech mic enter scroll starter prompts", icon: <IconZap size={16} />, group: "main" },
@@ -64,6 +73,29 @@ const SECTIONS: SectionConfig[] = [
   { id: "language", labelKey: "secLanguage", keywords: "app interface language english hindi hinglish ui", icon: <IconGlobe size={16} />, group: "extra" },
   { id: "help", labelKey: "secHelp", keywords: "faq support report bug problem contact", icon: <IconHelpCircle size={16} />, group: "extra" },
   { id: "about", labelKey: "secAbout", keywords: "version terms privacy policy keyboard shortcuts install pwa", icon: <IconInfo size={16} />, group: "extra" },
+];
+
+const SEARCH_ITEMS: SearchMatchEntry[] = [
+  { title: "Display name & email", section: "account", keywords: "display name email account login" },
+  { title: "Theme (Light / Dark / Auto)", section: "appearance", keywords: "theme dark light auto" },
+  { title: "Text size, Density & Reduce motion", section: "appearance", keywords: "text size font density compact reduce motion animation" },
+  { title: "Code block wrapping", section: "appearance", keywords: "code wrap scroll blocks" },
+  { title: "Nickname & custom instructions", section: "personalization", keywords: "nickname role about instructions response style reply language" },
+  { title: "Memory management", section: "capabilities", keywords: "memory memories remember facts" },
+  { title: "Reference past chats", section: "capabilities", keywords: "reference past chats history" },
+  { title: "Web search default", section: "capabilities", keywords: "web search internet" },
+  { title: "Read-aloud Voice, Call Mode & Mic language", section: "capabilities", keywords: "voice call speech tts stt mic speed preview captions barge-in silence earphones hindi" },
+  { title: "Enter sends, Auto-scroll & Starter prompts", section: "capabilities", keywords: "enter ctrl send scroll starter prompts" },
+  { title: "Background notifications & chime sound", section: "notifications", keywords: "notification alert sound chime" },
+  { title: "Export, Delete chats & Temporary default", section: "privacy", keywords: "export json delete temporary clear device data" },
+  { title: "Break reminder timer", section: "wellbeing", keywords: "break reminder 60 90 120 minutes" },
+  { title: "Support resources (India helplines)", section: "wellbeing", subView: "support-resources", keywords: "helpline india tele-manas kiran nimhans icall support" },
+  { title: "Custom writing styles", section: "customize", keywords: "custom style writing tone sample" },
+  { title: "App UI Language (English / Hindi / Hinglish)", section: "language", keywords: "app language hindi hinglish english ui" },
+  { title: "FAQs & Report a problem", section: "help", keywords: "faq help report bug issue" },
+  { title: "Terms of Use", section: "about", subView: "terms", keywords: "terms legal usage" },
+  { title: "Privacy Policy", section: "about", subView: "privacy", keywords: "privacy policy data" },
+  { title: "Keyboard shortcuts", section: "about", subView: "shortcuts", keywords: "keyboard shortcuts ctrl" },
 ];
 
 const FAQ_ITEMS = [
@@ -107,13 +139,15 @@ const FAQ_ITEMS = [
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
+  isExactList = false,
+  activeTab,
+  subView,
+  onSelectSection,
+  onBack,
   onClose,
-  initialTab = "account",
-  initialSubView = "main",
-  onTabChange,
 }) => {
   const { theme, setTheme } = useTheme();
-  const { user, firebaseUser, isGuest, logout } = useAuth();
+  const { user, firebaseUser, isGuest, logout, setIsAuthScreenVisible } = useAuth();
   const {
     isStandalone,
     isInstalled,
@@ -143,11 +177,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const t = (key: string) => translate(key, preferences.interfaceLanguage);
 
-  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
-  const [subView, setSubView] = useState<SettingsSubView>(initialSubView);
-  const [mobileStage, setMobileStage] = useState<"list" | "detail">("list");
+  const mobileStage: "list" | "detail" = isExactList ? "list" : "detail";
   const [searchQuery, setSearchQuery] = useState("");
   const dialogRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const paneTitleRef = useRef<HTMLHeadingElement>(null);
+  const listScrollTopRef = useRef<number>(0);
 
   // Account & Personalization local controlled values (kept in sync on open/change)
   const [displayName, setDisplayName] = useState("");
@@ -164,6 +199,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [ttsSupported, setTtsSupported] = useState(false);
   const [sttSupported, setSttSupported] = useState(false);
+  const [isPreviewSpeaking, setIsPreviewSpeaking] = useState(false);
 
   // Notifications
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">("unsupported");
@@ -194,6 +230,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (typeof window === "undefined") return;
     const hasTts = "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
     setTtsSupported(hasTts);
+    let cleanupVoices: (() => void) | undefined;
     if (hasTts) {
       const refreshVoices = () => {
         try {
@@ -204,6 +241,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       };
       refreshVoices();
       window.speechSynthesis.addEventListener?.("voiceschanged", refreshVoices);
+      cleanupVoices = () => {
+        window.speechSynthesis.removeEventListener?.("voiceschanged", refreshVoices);
+      };
     }
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     setSttSupported(!!SpeechRec);
@@ -213,21 +253,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     } else {
       setNotifPermission("unsupported");
     }
+
+    return () => {
+      cleanupVoices?.();
+    };
   }, [isOpen]);
 
-  // Sync open state & deep-linked section/subView
+  // Sync controlled values when Settings opens or switches sections
   useEffect(() => {
-    if (!isOpen) return;
-    setActiveTab(initialTab || "account");
-    setSubView(initialSubView || "main");
-
-    // On mobile phones, if caller navigated to a specific section or subView (like Language, Help, Privacy, deep URL), jump straight to detail view; otherwise start at list
-    const openedExplicitSection =
-      initialSubView !== "main" ||
-      (initialTab && initialTab !== "account") ||
-      (typeof window !== "undefined" && window.location.pathname.startsWith("/settings/"));
-    setMobileStage(openedExplicitSection ? "detail" : "list");
-
+    if (!isOpen) {
+      setIsPreviewSpeaking(false);
+      return;
+    }
     setDisplayName(preferences.displayName || user?.display_name || firebaseUser?.displayName || "");
     setNickname(preferences.nickname || "");
     setUserRole(preferences.userRole || "");
@@ -238,8 +275,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setActionNotice(null);
     setStyleError(null);
     setReportStatus(null);
-    setSearchQuery("");
-  }, [isOpen, initialTab, initialSubView]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isOpen, activeTab, subView]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset search only when modal closes cleanly
+  useEffect(() => {
+    if (!isOpen) {
+      setSearchQuery("");
+      listScrollTopRef.current = 0;
+    }
+  }, [isOpen]);
+
+  // Move focus to the section heading when a section/subview opens, and restore list scroll on return
+  useEffect(() => {
+    if (!isOpen) return;
+    if (mobileStage === "list") {
+      requestAnimationFrame(() => {
+        if (sidebarRef.current) {
+          sidebarRef.current.scrollTop = listScrollTopRef.current;
+        }
+      });
+    } else {
+      requestAnimationFrame(() => {
+        paneTitleRef.current?.focus({ preventScroll: true });
+      });
+    }
+  }, [isOpen, mobileStage, activeTab, subView]);
 
   // Focus trap within settings modal for keyboard users
   useEffect(() => {
@@ -265,19 +325,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [isOpen, mobileStage, activeTab, subView]);
 
   const navigateSection = (tab: SettingsTabId, nextSubView: SettingsSubView = "main") => {
-    setActiveTab(tab);
-    setSubView(nextSubView);
-    setMobileStage("detail");
+    if (sidebarRef.current && mobileStage === "list") {
+      listScrollTopRef.current = sidebarRef.current.scrollTop;
+    }
     setConfirmDeleteAllMemories(false);
     setConfirmDeleteAllChats(false);
     setConfirmClearDevice(false);
     setActionNotice(null);
-    onTabChange?.(tab, nextSubView);
+    onSelectSection(tab, nextSubView);
   };
 
   const handleClose = () => {
     flushPreferencesNow();
     onClose();
+  };
+
+  const handleExitForAuthAction = () => {
+    flushPreferencesNow();
+    try {
+      window.history.replaceState(null, "", "/");
+    } catch {}
   };
 
   const showTempNotice = (msg: string) => {
@@ -420,15 +487,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const filteredSearchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return SEARCH_ITEMS.filter(
+      (item) =>
+        item.title.toLowerCase().includes(q) ||
+        item.keywords.includes(q) ||
+        item.section.includes(q)
+    ).slice(0, 6);
+  }, [searchQuery]);
+
   const handlePreviewVoice = () => {
-    speakTextWithPreferences(
+    if (isPreviewSpeaking && typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsPreviewSpeaking(false);
+      return;
+    }
+    setIsPreviewSpeaking(true);
+    const ok = speakTextWithPreferences(
       "Hello! This is a preview of how AUTONEXIS Assistant sounds with your selected voice settings.",
       {
         voiceName: preferences.voiceName,
         voiceSpeed: preferences.voiceSpeed,
         voiceLanguage: preferences.voiceLanguage,
+        onEnd: () => setIsPreviewSpeaking(false),
       }
     );
+    if (!ok) setIsPreviewSpeaking(false);
   };
 
   const currentSectionObj = SECTIONS.find((s) => s.id === activeTab);
@@ -448,7 +534,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         className={`settings-modal-dialog ${mobileStage === "detail" ? "mobile-stage-detail" : "mobile-stage-list"}`}
       >
         {/* Left Navigation Panel (Sidebar on Desktop, Full Section List on Phone) */}
-        <aside className="settings-sidebar" aria-label={t("settingsTitle")}>
+        <aside
+          ref={sidebarRef}
+          className="settings-sidebar"
+          aria-label={t("settingsTitle")}
+          onScroll={() => {
+            if (sidebarRef.current && mobileStage === "list") {
+              listScrollTopRef.current = sidebarRef.current.scrollTop;
+            }
+          }}
+        >
+          <div className="settings-list-mobile-topbar">
+            <button
+              type="button"
+              className="settings-mobile-back-btn"
+              onClick={onBack}
+            >
+              <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
+                <IconChevronRight size={16} />
+              </span>
+              <span>{t("back")}</span>
+            </button>
+            <span className="settings-list-mobile-title">{t("settingsTitle")}</span>
+          </div>
+
           <div className="settings-search-box">
             <IconSearch size={15} className="settings-search-icon" />
             <input
@@ -458,15 +567,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               aria-label={t("searchSettingsPlaceholder")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && searchQuery.trim()) {
+                  e.preventDefault();
+                  const firstMatch = filteredSearchMatches[0];
+                  if (firstMatch) {
+                    navigateSection(firstMatch.section, firstMatch.subView || "main");
+                  } else if (filteredSections[0]) {
+                    navigateSection(filteredSections[0].id, "main");
+                  }
+                }
+              }}
             />
           </div>
+
+          {filteredSearchMatches.length > 0 && (
+            <div className="settings-search-matches" role="region" aria-label="Search matches">
+              {filteredSearchMatches.map((match) => {
+                const secObj = SECTIONS.find((s) => s.id === match.section);
+                const secLabel = secObj ? t(secObj.labelKey) : match.section;
+                return (
+                  <button
+                    key={`${match.section}_${match.subView || "main"}_${match.title}`}
+                    type="button"
+                    className="settings-search-match-btn"
+                    onClick={() => navigateSection(match.section, match.subView || "main")}
+                  >
+                    <span className="settings-search-match-title">{match.title}</span>
+                    <span className="settings-search-match-path">{secLabel}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div className="settings-nav-group">
             {mainNav.map((item) => (
               <button
                 key={item.id}
                 type="button"
-                className={`settings-nav-btn ${activeTab === item.id ? "active" : ""}`}
+                className={`settings-nav-btn ${activeTab === item.id && !isExactList ? "active" : ""}`}
                 onClick={() => navigateSection(item.id, "main")}
                 aria-current={activeTab === item.id ? "page" : undefined}
               >
@@ -487,7 +627,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <button
                     key={item.id}
                     type="button"
-                    className={`settings-nav-btn ${activeTab === item.id ? "active" : ""}`}
+                    className={`settings-nav-btn ${activeTab === item.id && !isExactList ? "active" : ""}`}
                     onClick={() => navigateSection(item.id, "main")}
                     aria-current={activeTab === item.id ? "page" : undefined}
                   >
@@ -502,7 +642,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </>
           )}
 
-          {filteredSections.length === 0 && (
+          {filteredSections.length === 0 && filteredSearchMatches.length === 0 && (
             <div className="settings-nav-empty">No matching settings found.</div>
           )}
 
@@ -528,13 +668,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               type="button"
               className="settings-mobile-back-btn"
-              onClick={() => {
-                if (subView !== "main") {
-                  navigateSection(activeTab, "main");
-                } else {
-                  setMobileStage("list");
-                }
-              }}
+              onClick={onBack}
             >
               <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
                 <IconChevronRight size={16} />
@@ -542,7 +676,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <span>{t("back")}</span>
             </button>
 
-            <h3 className="settings-pane-title">{currentTitle}</h3>
+            <h3 ref={paneTitleRef} tabIndex={-1} className="settings-pane-title">
+              {currentTitle}
+            </h3>
 
             <div className="settings-inline-save-badge" aria-live="polite">
               {prefSaveStatus === "saving" && <span>{t("savingStatus")}</span>}
@@ -613,7 +749,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span className="settings-readonly-value">{accountCreatedFormatted}</span>
               </div>
 
-              {!isGuest && (
+              {isGuest ? (
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <span className="settings-item-title">{t("signIn")}</span>
+                    <span className="settings-item-desc">Sign in to sync chats, preferences, and custom styles across devices.</span>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => {
+                      handleExitForAuthAction();
+                      setIsAuthScreenVisible(true);
+                    }}
+                  >
+                    {t("signIn")}
+                  </Button>
+                </div>
+              ) : (
                 <div className="settings-row">
                   <div className="settings-row-info">
                     <span className="settings-item-title">{t("logOut")}</span>
@@ -623,7 +776,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     variant="secondary"
                     size="sm"
                     onClick={() => {
-                      handleClose();
+                      handleExitForAuthAction();
                       logout();
                     }}
                   >
@@ -1057,13 +1210,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
 
-              <div className="settings-subsection-title">Voice</div>
+              <div className="settings-subsection-title">Voice &amp; Live Calls</div>
               {ttsSupported ? (
                 <>
                   <div className="settings-row">
                     <div className="settings-row-info">
                       <span className="settings-item-title">{t("voiceReadAloud")}</span>
-                      <span className="settings-item-desc">Browser voice used for Read Aloud buttons.</span>
+                      <span className="settings-item-desc">Installed device voice used for Read Aloud and live voice calls.</span>
                     </div>
                     <select
                       aria-label={t("voiceReadAloud")}
@@ -1072,7 +1225,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       onChange={(e) => updatePreferences({ voiceName: e.target.value })}
                     >
                       <option value="">System default voice</option>
-                      {availableVoices.slice(0, 30).map((v) => (
+                      {availableVoices.slice(0, 40).map((v) => (
                         <option key={`${v.name}_${v.lang}`} value={v.name}>
                           {v.name} ({v.lang})
                         </option>
@@ -1083,7 +1236,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="settings-row">
                     <div className="settings-row-info">
                       <span className="settings-item-title">{t("voiceLanguage")}</span>
-                      <span className="settings-item-desc">Preferred speech output locale.</span>
+                      <span className="settings-item-desc">Preferred speech output language for calls and read-aloud.</span>
                     </div>
                     <select
                       aria-label={t("voiceLanguage")}
@@ -1117,7 +1270,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         ))}
                       </div>
                       <Button variant="secondary" size="sm" onClick={handlePreviewVoice}>
-                        <IconVolume size={14} /> {t("voicePreview")}
+                        <IconVolume size={14} /> {isPreviewSpeaking ? "Stop Preview" : t("voicePreview")}
                       </Button>
                     </div>
                   </div>
@@ -1128,29 +1281,128 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              {sttSupported ? (
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <span className="settings-item-title">{t("micLanguage")}</span>
-                    <span className="settings-item-desc">Language recognized when you dictate using the microphone.</span>
-                  </div>
-                  <select
-                    aria-label={t("micLanguage")}
-                    className="settings-select-control"
-                    value={preferences.micLanguage || "en-IN"}
-                    onChange={(e) => updatePreferences({ micLanguage: e.target.value })}
-                  >
-                    <option value="en-IN">English (India)</option>
-                    <option value="hi-IN">Hindi (India)</option>
-                    <option value="en-US">English (US)</option>
-                    <option value="en-GB">English (UK)</option>
-                  </select>
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">{t("micLanguage")}</span>
+                  <span className="settings-item-desc">
+                    Spoken language for voice calls and dictation ({sttSupported ? "browser speech + fallback" : "audio transcription"}).
+                  </span>
                 </div>
-              ) : (
-                <div className="settings-info-note">
-                  Voice dictation (microphone speech-to-text) is not supported in this browser.
+                <select
+                  aria-label={t("micLanguage")}
+                  className="settings-select-control"
+                  value={preferences.micLanguage || "en-IN"}
+                  onChange={(e) => updatePreferences({ micLanguage: e.target.value })}
+                >
+                  <option value="en-IN">English (India)</option>
+                  <option value="hi-IN">Hindi (India)</option>
+                  <option value="en-US">English (US)</option>
+                  <option value="en-GB">English (UK)</option>
+                </select>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Call Live Captions</span>
+                  <span className="settings-item-desc">Show live subtitles of what you say and the reply during calls.</span>
                 </div>
-              )}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={preferences.voiceCallCaptions !== false}
+                  aria-label="Call Live Captions"
+                  className={`settings-toggle-btn ${preferences.voiceCallCaptions !== false ? "active" : ""}`}
+                  onClick={() =>
+                    updatePreferences({ voiceCallCaptions: preferences.voiceCallCaptions === false })
+                  }
+                >
+                  <span className="settings-toggle-knob" />
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Interrupt Assistant (Barge-in)</span>
+                  <span className="settings-item-desc">Allow speaking to stop the assistant mid-sentence during a call.</span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={preferences.voiceCallBargeIn !== false}
+                  aria-label="Interrupt Assistant"
+                  className={`settings-toggle-btn ${preferences.voiceCallBargeIn !== false ? "active" : ""}`}
+                  onClick={() =>
+                    updatePreferences({ voiceCallBargeIn: preferences.voiceCallBargeIn === false })
+                  }
+                >
+                  <span className="settings-toggle-knob" />
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Speech End Pause</span>
+                  <span className="settings-item-desc">Pause after your last words before finishing your turn.</span>
+                </div>
+                <div className="settings-pill-group" role="group" aria-label="Speech End Pause">
+                  {([800, 1000, 1200] as const).map((ms) => (
+                    <button
+                      key={ms}
+                      type="button"
+                      className={`settings-pill-btn ${(preferences.voiceCallEndPauseMs || 1000) === ms ? "active" : ""}`}
+                      onClick={() => updatePreferences({ voiceCallEndPauseMs: ms })}
+                    >
+                      {ms}ms
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Silence Auto-End</span>
+                  <span className="settings-item-desc">Automatically hang up after sustained silence on a call.</span>
+                </div>
+                <div className="settings-pill-group" role="group" aria-label="Silence Auto-End">
+                  {([30, 60, 90] as const).map((sec) => (
+                    <button
+                      key={sec}
+                      type="button"
+                      className={`settings-pill-btn ${(preferences.voiceCallSilenceSec || 60) === sec ? "active" : ""}`}
+                      onClick={() => updatePreferences({ voiceCallSilenceSec: sec })}
+                    >
+                      {sec}s
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Enhanced English Call Voice</span>
+                  <span className="settings-item-desc">
+                    Use natural English audio synthesis when available; falls back seamlessly to your device voice.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!preferences.voiceCallCloudTts}
+                  aria-label="Enhanced English Call Voice"
+                  className={`settings-toggle-btn ${preferences.voiceCallCloudTts ? "active" : ""}`}
+                  onClick={() =>
+                    updatePreferences({ voiceCallCloudTts: !preferences.voiceCallCloudTts })
+                  }
+                >
+                  <span className="settings-toggle-knob" />
+                </button>
+              </div>
+
+              <div className="settings-info-note">
+                <strong>Tip:</strong> Use earphones for the best experience.
+                <br />
+                Your voice is turned into text to answer you. Audio is not stored. Browser speech recognition may send audio to your browser&apos;s speech service.
+              </div>
 
               <div className="settings-subsection-title">Input</div>
               <div className="settings-row">
@@ -1393,7 +1645,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       variant="primary"
                       size="sm"
                       onClick={() => {
-                        handleClose();
+                        handleExitForAuthAction();
                         clearLocalDeviceData();
                       }}
                     >
@@ -1483,7 +1735,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === "wellbeing" && subView === "support-resources" && (
             <div className="settings-tab-pane">
               <div className="settings-subview-header">
-                <Button variant="ghost" size="sm" onClick={() => navigateSection("wellbeing", "main")}>
+                <Button variant="ghost" size="sm" onClick={onBack}>
                   <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
                     <IconChevronRight size={14} />
                   </span>
@@ -1900,7 +2152,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === "about" && subView === "terms" && (
             <div className="settings-tab-pane">
               <div className="settings-subview-header">
-                <Button variant="ghost" size="sm" onClick={() => navigateSection("about", "main")}>
+                <Button variant="ghost" size="sm" onClick={onBack}>
                   <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
                     <IconChevronRight size={14} />
                   </span>
@@ -1926,7 +2178,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === "about" && subView === "privacy" && (
             <div className="settings-tab-pane">
               <div className="settings-subview-header">
-                <Button variant="ghost" size="sm" onClick={() => navigateSection("about", "main")}>
+                <Button variant="ghost" size="sm" onClick={onBack}>
                   <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
                     <IconChevronRight size={14} />
                   </span>
@@ -1955,7 +2207,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === "about" && subView === "shortcuts" && (
             <div className="settings-tab-pane">
               <div className="settings-subview-header">
-                <Button variant="ghost" size="sm" onClick={() => navigateSection("about", "main")}>
+                <Button variant="ghost" size="sm" onClick={onBack}>
                   <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
                     <IconChevronRight size={14} />
                   </span>

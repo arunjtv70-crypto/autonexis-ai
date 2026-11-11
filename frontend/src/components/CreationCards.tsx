@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { useAppNavigation } from "../state/navigation";
 import {
   IconDownload,
   IconCopy,
@@ -23,9 +24,41 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
   prompt,
   imageUrl,
 }) => {
+  const { hasOverlay, pushOverlay, closeOverlay } = useAppNavigation();
   const [copied, setCopied] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isLocalFullscreen, setIsLocalFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+
+  const isFullscreen = isLocalFullscreen && hasOverlay("lightbox");
+
+  useEffect(() => {
+    if (!hasOverlay("lightbox") && isLocalFullscreen) {
+      setIsLocalFullscreen(false);
+    }
+  }, [hasOverlay, isLocalFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setIsLocalFullscreen(false);
+        closeOverlay("lightbox");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFullscreen, closeOverlay]);
+
+  const openFullscreen = () => {
+    setIsLocalFullscreen(true);
+    pushOverlay("lightbox");
+  };
+
+  const closeFullscreen = () => {
+    setIsLocalFullscreen(false);
+    closeOverlay("lightbox");
+  };
 
   // Clean prompt and enforce nologo / private parameters
   const cleanPrompt =
@@ -137,7 +170,7 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
 
       <div
         className="creation-image-wrapper"
-        onClick={() => setIsFullscreen(true)}
+        onClick={openFullscreen}
         title="Click to view full size"
       >
         {isLoading && (
@@ -180,7 +213,7 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
       </div>
 
       {isFullscreen && (
-        <div className="creation-lightbox" onClick={() => setIsFullscreen(false)}>
+        <div className="creation-lightbox" onClick={closeFullscreen}>
           <div className="lightbox-img-wrapper" onClick={(e) => e.stopPropagation()}>
             <img src={finalImageUrl} alt={prompt} className="lightbox-img" />
             <div className="creation-watermark-overlay lightbox-watermark">
@@ -195,7 +228,8 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
           <button
             type="button"
             className="lightbox-close-btn"
-            onClick={() => setIsFullscreen(false)}
+            aria-label="Close image preview"
+            onClick={closeFullscreen}
           >
             ✕
           </button>

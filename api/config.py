@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     llm_enable_think_self_check: bool = True
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
+    # Optional Search & Voice Settings (hardcoded defaults; no required env vars)
+    tavily_api_key: str = ""
+    voice_stt_model: str = "whisper-large-v3-turbo"
+    voice_cloud_tts_enabled: bool = True
+    voice_tts_model: str = "canopylabs/orpheus-v1-english"
+    voice_tts_voice: str = "autumn"
+    voice_rpm_limit: int = 10
+    voice_daily_minutes_limit: float = 15.0
+
     # Firebase Authentication
     firebase_project_id: str = "autonexis-ai-assistant-7a2e7"
 

@@ -59,7 +59,8 @@ export async function postChatMessage(
   isGuest = false,
   projectContext?: any,
   relevantPastChats?: any[],
-  customStyle?: any
+  customStyle?: any,
+  voice = false
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat`;
   try {
@@ -74,6 +75,7 @@ export async function postChatMessage(
         project_context: projectContext || undefined,
         relevant_past_chats: relevantPastChats || undefined,
         custom_style: customStyle || undefined,
+        voice: voice || undefined,
       }),
     });
 
@@ -105,7 +107,8 @@ export async function streamChatMessage(
   signal?: AbortSignal,
   projectContext?: any,
   relevantPastChats?: any[],
-  customStyle?: any
+  customStyle?: any,
+  voice = false
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
@@ -121,12 +124,18 @@ export async function streamChatMessage(
         project_context: projectContext || undefined,
         relevant_past_chats: relevantPastChats || undefined,
         custom_style: customStyle || undefined,
+        voice: voice || undefined,
       }),
     });
 
     if (res.status === 401) {
       await handleUnauthorized();
       onError(new Error("Session expired. Please log in again."));
+      return;
+    }
+
+    if (res.status === 429) {
+      onError(Object.assign(new Error("Voice is busy, please try again shortly"), { rateLimited: true }));
       return;
     }
 
@@ -139,7 +148,8 @@ export async function streamChatMessage(
         isGuest,
         projectContext,
         relevantPastChats,
-        customStyle
+        customStyle,
+        voice
       );
       onChunk(directReply);
       onDone();
@@ -174,7 +184,10 @@ export async function streamChatMessage(
             }
             try {
               const parsed = JSON.parse(dataStr);
-              if (parsed.error && parsed.content) {
+              if (parsed.rate_limited) {
+                onError(Object.assign(new Error(parsed.content || "Voice is busy, please try again shortly"), { rateLimited: true }));
+                return;
+              } else if (parsed.error && parsed.content) {
                 onChunk(parsed.content);
               } else if (typeof parsed.content === "string") {
                 // NEVER trim chunks - preserve spaces, code indentation, and newlines!
@@ -189,7 +202,7 @@ export async function streamChatMessage(
     }
   } catch (err: any) {
     if (err?.name === "AbortError") {
-      // Stream aborted intentionally during account switch or logout
+      // Stream aborted intentionally during account switch, barge-in, or logout
       return;
     }
     onError(err);
@@ -253,5 +266,114 @@ export async function createCustomStyleApi(
   } catch (err) {
     console.warn("[AUTONEXIS] Style analysis error:", err);
     return { description: "", error: "Network error while analyzing style." };
+  }
+}
+
+export async function transcribeVoiceAudioApi(
+  audioBlob: Blob,
+  language: string,
+  durationSec: number,
+  signal?: AbortSignal
+): Promise<{ text: string; rateLimited?: boolean; error?: string }> {
+  const url = `${API_BASE_URL}/voice/transcribe`;
+  try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      return { text: "", error: "Please log in to use voice calls." };
+    }
+    const idToken = await currentUser.getIdToken();
+    const mime = (audioBlob.type || "audio/webm").toLowerCase();
+    const ext = mime.includes("mp4") || mime.includes("m4a")
+      ? "mp4"
+      : mime.includes("ogg")
+      ? "ogg"
+      : mime.includes("wav")
+      ? "wav"
+      : "webm";
+
+    const form = new FormData();
+    form.append("file", audioBlob, `speech.${ext}`);
+    form.append("language", language || "en-IN");
+    form.append("duration_sec", String(Math.max(0.4, Math.min(35, durationSec))));
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: form,
+      signal,
+    });
+
+    if (res.status === 401) {
+      await handleUnauthorized();
+      return { text: "", error: "Session expired. Please log in again." };
+    }
+
+    if (res.status === 429 || res.status === 503) {
+      let detail = "Voice is busy, please try again shortly";
+      try {
+        const j = await res.json();
+        if (j?.detail) detail = j.detail;
+      } catch {}
+      return { text: "", rateLimited: true, error: detail };
+    }
+
+    if (!res.ok) {
+      let detail = "Could not transcribe your voice turn right now.";
+      try {
+        const j = await res.json();
+        if (j?.detail) detail = j.detail;
+      } catch {}
+      return { text: "", error: detail };
+    }
+
+    const plainText = (await res.text()).trim();
+    return { text: plainText };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      return { text: "" };
+    }
+    return { text: "", error: "Network error while sending audio." };
+  }
+}
+
+export async function synthesizeEnglishSpeechApi(
+  text: string,
+  voice = "autumn",
+  signal?: AbortSignal
+): Promise<{ audioBlob?: Blob; fallbackBrowser: boolean; rateLimited?: boolean }> {
+  const url = `${API_BASE_URL}/voice/speak`;
+  try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) return { fallbackBrowser: true };
+    const idToken = await currentUser.getIdToken();
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        text: text.slice(0, 200),
+        voice,
+        language: "en-IN",
+      }),
+      signal,
+    });
+
+    if (res.status === 429) {
+      return { fallbackBrowser: true, rateLimited: true };
+    }
+    if (!res.ok) {
+      return { fallbackBrowser: true };
+    }
+    const blob = await res.blob();
+    if (!blob || blob.size < 64) {
+      return { fallbackBrowser: true };
+    }
+    return { audioBlob: blob, fallbackBrowser: false };
+  } catch {
+    return { fallbackBrowser: true };
   }
 }

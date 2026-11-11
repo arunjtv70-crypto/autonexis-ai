@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { useAppNavigation } from "./navigation";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -66,6 +67,7 @@ export interface PwaContextType {
 const PwaContext = createContext<PwaContextType | undefined>(undefined);
 
 export const PwaProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { hasOverlay, pushOverlay, closeOverlay } = useAppNavigation();
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(
     () => earlyDeferredPrompt
   );
@@ -77,7 +79,17 @@ export const PwaProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return checkIsStandalone();
     }
   });
-  const [showIosSheet, setShowIosSheet] = useState(false);
+  const showIosSheet = hasOverlay("iosInstall");
+  const setShowIosSheet = useCallback(
+    (show: boolean) => {
+      if (show) {
+        pushOverlay("iosInstall");
+      } else {
+        closeOverlay("iosInstall");
+      }
+    },
+    [pushOverlay, closeOverlay]
+  );
   const [bannerDismissed, setBannerDismissed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(BANNER_DISMISSED_KEY) === "true";
@@ -93,12 +105,20 @@ export const PwaProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const syncEarly = () => {
       if (earlyDeferredPrompt) {
         setDeferredPrompt(earlyDeferredPrompt);
+        setIsInstalled(false);
+        try {
+          localStorage.removeItem(APP_INSTALLED_KEY);
+        } catch {}
       }
     };
     const handleBeforeInstall = (e: Event) => {
       e.preventDefault();
       earlyDeferredPrompt = e as BeforeInstallPromptEvent;
       setDeferredPrompt(earlyDeferredPrompt);
+      setIsInstalled(false);
+      try {
+        localStorage.removeItem(APP_INSTALLED_KEY);
+      } catch {}
     };
     const handleAppInstalled = () => {
       earlyDeferredPrompt = null;
@@ -128,11 +148,15 @@ export const PwaProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  const canPromptInstall = !!deferredPrompt && !isStandalone && !isInstalled;
+  const canPromptInstall = !!deferredPrompt && !isStandalone && !isInstalled && !isIos;
   const isInstallSupported = !isStandalone && !isInstalled && (canPromptInstall || isIos);
 
   const triggerInstall = useCallback(async () => {
     if (isStandalone || isInstalled) return;
+    if (isIos) {
+      setShowIosSheet(true);
+      return;
+    }
     if (deferredPrompt) {
       try {
         await deferredPrompt.prompt();
@@ -151,10 +175,7 @@ export const PwaProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return;
     }
-    if (isIos) {
-      setShowIosSheet(true);
-    }
-  }, [deferredPrompt, isIos, isStandalone, isInstalled]);
+  }, [deferredPrompt, isIos, isStandalone, isInstalled, setShowIosSheet]);
 
   const dismissPostLoginBanner = useCallback(() => {
     setBannerDismissed(true);

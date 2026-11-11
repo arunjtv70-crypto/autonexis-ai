@@ -8,11 +8,13 @@ import {
 } from "../state/chats";
 import { useAuth } from "../state/auth";
 import { usePwa } from "../state/pwa";
+import { useAppNavigation } from "../state/navigation";
 import { Logo } from "../components/Logo";
 import { SettingsModal } from "../components/SettingsModal";
 import { ProjectModal } from "../components/ProjectModal";
 import { PwaInstallModal } from "../components/PwaInstallModal";
-import { UserMenuDropdown, type SettingsTabId, type SettingsSubView } from "../components/UserMenuDropdown";
+import { UserMenuDropdown } from "../components/UserMenuDropdown";
+import { VoiceCallModal } from "../components/VoiceCallModal";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { translate } from "../i18n/translations";
 import type { FirestoreProject } from "../db";
@@ -60,6 +62,8 @@ import {
   IconThumbsDown,
   IconSmartphone,
   IconMoreHorizontal,
+  IconDownload,
+  IconPhone,
 } from "../components/Icons";
 import "./ChatScreen.css";
 
@@ -67,42 +71,6 @@ import "./ChatScreen.css";
 interface IWindow extends Window {
   SpeechRecognition?: any;
   webkitSpeechRecognition?: any;
-}
-
-const VALID_SETTINGS_SECTIONS = new Set<SettingsTabId>([
-  "account",
-  "appearance",
-  "personalization",
-  "capabilities",
-  "notifications",
-  "privacy",
-  "wellbeing",
-  "customize",
-  "language",
-  "help",
-  "about",
-]);
-
-function parseSettingsPath(
-  pathname: string
-): { tab: SettingsTabId; subView: SettingsSubView } | null {
-  const clean = (pathname || "").replace(/\/+$/, "");
-  if (clean === "/settings") {
-    return { tab: "account", subView: "main" };
-  }
-  if (!clean.startsWith("/settings/")) return null;
-  const parts = clean.slice("/settings/".length).split("/").filter(Boolean);
-  const rawTab = parts[0] as SettingsTabId;
-  if (!VALID_SETTINGS_SECTIONS.has(rawTab)) return null;
-  const rawSub = (parts[1] || "main") as SettingsSubView;
-  const validSub: SettingsSubView =
-    rawSub === "terms" ||
-    rawSub === "privacy" ||
-    rawSub === "shortcuts" ||
-    rawSub === "support-resources"
-      ? rawSub
-      : "main";
-  return { tab: rawTab, subView: validSub };
 }
 
 export const ChatScreen: React.FC = () => {
@@ -146,20 +114,26 @@ export const ChatScreen: React.FC = () => {
 
   const { user, firebaseUser, isGuest, setIsAuthScreenVisible, logout } = useAuth();
   const {
-    isStandalone,
-    isInstalled,
-    canPromptInstall,
     isInstallSupported,
+    isIos,
     triggerInstall,
     shouldShowPostLoginBanner,
     dismissPostLoginBanner,
     markBannerShownNow,
   } = usePwa();
+  const {
+    route,
+    hasOverlay,
+    pushOverlay,
+    closeOverlay,
+    closeAllOverlays,
+    openSettings,
+    navigateSettings,
+    goBackFromSettings,
+    closeSettings,
+  } = useAppNavigation();
 
   const t = (key: string) => translate(key, preferences.interfaceLanguage);
-
-  const initialRoute =
-    typeof window !== "undefined" ? parseSettingsPath(window.location.pathname) : null;
 
   // Input & UI States
   const [inputContent, setInputContent] = useState("");
@@ -167,14 +141,29 @@ export const ChatScreen: React.FC = () => {
   const [searchResults, setSearchResults] = useState<ChatSearchResult[] | null>(null);
   const [isSearchingMessages, setIsSearchingMessages] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(!!initialRoute);
-  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(initialRoute?.tab || "account");
-  const [settingsSubView, setSettingsSubView] = useState<SettingsSubView>(
-    initialRoute?.subView || "main"
-  );
-  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const accountAnchorRef = useRef<HTMLButtonElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Coordinated history-backed overlay states
+  const isMobileMenuOpen = hasOverlay("drawer");
+  const setIsMobileMenuOpen = (open: boolean) =>
+    open ? pushOverlay("drawer") : closeOverlay("drawer");
+  const isUserMenuOpen = hasOverlay("accountMenu");
+  const isProjectModalOpen = hasOverlay("projectModal");
+  const setIsProjectModalOpen = (open: boolean) =>
+    open ? pushOverlay("projectModal") : closeOverlay("projectModal");
+  const isVoiceCallOpen = hasOverlay("voiceCall");
+  const isSettingsOpen = route.isSettings;
+  const [guestModalReason, setGuestModalReason] = useState<"limit" | "voiceCall">("limit");
+
+  const handleLaunchVoiceCall = () => {
+    if (isGuest) {
+      setGuestModalReason("voiceCall");
+      setShowGuestLimitModal(true);
+      return;
+    }
+    pushOverlay("voiceCall");
+  };
 
   // Wellbeing break reminder tracking
   const [showBreakReminder, setShowBreakReminder] = useState(false);
@@ -185,7 +174,6 @@ export const ChatScreen: React.FC = () => {
   const [openChatMenuId, setOpenChatMenuId] = useState<string | null>(null);
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [renameInputVal, setRenameInputVal] = useState("");
-  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<FirestoreProject | null>(null);
 
   // Feedback & Message Editing States
@@ -233,43 +221,24 @@ export const ChatScreen: React.FC = () => {
     user?.display_name ||
     (user?.email ? user.email.split("@")[0].replace(/[._-]+/g, " ").trim() : (memory.userName || "User"));
 
-  const openSettingsAt = (tab: SettingsTabId = "account", subView: SettingsSubView = "main") => {
-    setSettingsTab(tab);
-    setSettingsSubView(subView);
-    setIsSettingsOpen(true);
-    setIsMobileMenuOpen(false);
-    setIsUserMenuOpen(false);
-    try {
-      const nextPath = `/settings/${tab}${subView !== "main" ? `/${subView}` : ""}`;
-      if (window.location.pathname !== nextPath) {
-        window.history.pushState(null, "", nextPath);
-      }
-    } catch {}
-  };
-
-  const closeSettings = () => {
-    setIsSettingsOpen(false);
-    try {
-      if (window.location.pathname.startsWith("/settings")) {
-        window.history.pushState(null, "", "/");
-      }
-    } catch {}
-  };
+  // Keep Guest Limit modal synced with the browser history overlay stack
+  const isGuestOverlayOpen = hasOverlay("guestModal");
+  const prevGuestOverlayOpenRef = useRef(false);
+  useEffect(() => {
+    if (showGuestLimitModal && !isGuestOverlayOpen && !prevGuestOverlayOpenRef.current) {
+      pushOverlay("guestModal");
+    } else if (!showGuestLimitModal && isGuestOverlayOpen && prevGuestOverlayOpenRef.current) {
+      closeOverlay("guestModal");
+    }
+  }, [showGuestLimitModal, isGuestOverlayOpen, pushOverlay, closeOverlay]);
 
   useEffect(() => {
-    const onPopState = () => {
-      const parsed = parseSettingsPath(window.location.pathname);
-      if (parsed) {
-        setSettingsTab(parsed.tab);
-        setSettingsSubView(parsed.subView);
-        setIsSettingsOpen(true);
-      } else {
-        setIsSettingsOpen(false);
-      }
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+    if (prevGuestOverlayOpenRef.current && !isGuestOverlayOpen && showGuestLimitModal) {
+      setGuestModalReason("limit");
+      setShowGuestLimitModal(false);
+    }
+    prevGuestOverlayOpenRef.current = isGuestOverlayOpen;
+  }, [isGuestOverlayOpen, showGuestLimitModal, setShowGuestLimitModal]);
 
   // Wellbeing break reminder active timer (only counts while tab is visible)
   useEffect(() => {
@@ -329,45 +298,44 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  // Global Shortcuts: Ctrl+K (Search), Ctrl+Shift+, (Settings), Ctrl+Shift+O (New Chat), Esc (Close dialogs)
+  // Global Shortcuts: Ctrl+K (Search), Ctrl+Shift+, (Settings), Ctrl+Shift+O (New Chat), Esc (Close topmost dialog)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         if (window.innerWidth <= 768) {
-          setIsMobileMenuOpen(true);
+          pushOverlay("drawer");
           setTimeout(() => searchInputRef.current?.focus(), 40);
         } else {
           searchInputRef.current?.focus();
         }
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "," || e.key === "<")) {
         e.preventDefault();
-        setIsSettingsOpen((prev) => {
-          if (prev) {
-            try {
-              if (window.location.pathname.startsWith("/settings")) {
-                window.history.pushState(null, "", "/");
-              }
-            } catch {}
-            return false;
-          }
-          setSettingsTab("account");
-          setSettingsSubView("main");
-          try {
-            if (window.location.pathname !== "/settings/account") {
-              window.history.pushState(null, "", "/settings/account");
-            }
-          } catch {}
-          return true;
-        });
+        if (isSettingsOpen) {
+          closeSettings();
+        } else {
+          openSettings(null);
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "O" || e.key === "o")) {
         e.preventDefault();
         createNewChat();
       } else if (e.key === "Escape") {
-        closeSettings();
-        setIsProjectModalOpen(false);
-        setIsMobileMenuOpen(false);
-        setIsUserMenuOpen(false);
+        // Topmost modal components (Lightbox, Modal/ProjectModal/iOS sheet, UserMenu) stopPropagation on their own Esc handlers; handle remaining overlays calmly
+        if (hasOverlay("voiceCall") || hasOverlay("lightbox") || hasOverlay("iosInstall") || hasOverlay("projectModal") || hasOverlay("accountMenu")) {
+          return;
+        }
+        if (hasOverlay("guestModal")) {
+          setShowGuestLimitModal(false);
+          return;
+        }
+        if (hasOverlay("drawer")) {
+          closeOverlay("drawer");
+          return;
+        }
+        if (isSettingsOpen) {
+          closeSettings();
+          return;
+        }
         setOpenChatMenuId(null);
         setIsAttachmentMenuOpen(false);
         setIsHomeAttachmentMenuOpen(false);
@@ -379,7 +347,7 @@ export const ChatScreen: React.FC = () => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [createNewChat]);
+  }, [createNewChat, isSettingsOpen, hasOverlay, pushOverlay, closeOverlay, openSettings, closeSettings, setShowGuestLimitModal]);
 
   // Setup Web Speech Recognition (STT)
   useEffect(() => {
@@ -853,7 +821,7 @@ export const ChatScreen: React.FC = () => {
         <button
           type="button"
           className="sidebar-nav-btn"
-          onClick={() => openSettingsAt("account", "main")}
+          onClick={() => openSettings(null)}
         >
           <div className="sidebar-nav-btn-left">
             <IconSettings size={15} />
@@ -1057,48 +1025,36 @@ export const ChatScreen: React.FC = () => {
 
       {/* Bottom User Profile & Account Menu Trigger */}
       <div className="sidebar-bottom">
-        <div
-          role="button"
-          tabIndex={0}
+        <button
+          type="button"
           aria-haspopup="menu"
           aria-expanded={isUserMenuOpen}
           className="user-profile-pill"
-          onClick={() => setIsUserMenuOpen((prev) => !prev)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              setIsUserMenuOpen((prev) => !prev);
+          onClick={(e) => {
+            accountAnchorRef.current = e.currentTarget;
+            if (isUserMenuOpen) {
+              closeOverlay("accountMenu");
+            } else {
+              pushOverlay("accountMenu");
             }
           }}
           title="Account Menu"
         >
-          <div className="user-profile-left">
-            <div className="user-avatar-circle">
+          <span className="user-profile-left">
+            <span className="user-avatar-circle">
               <img
                 src={firebaseUser?.photoURL || "/logo_circle.png?v=20261107"}
                 alt="User"
                 className="user-avatar-img"
               />
-            </div>
+            </span>
             <span className="user-name-text">
               {userName}
               {isGuest ? ` · ${t("guestMode")}` : ""}
             </span>
-          </div>
+          </span>
           <IconChevronDown size={14} style={{ opacity: 0.7 }} />
-        </div>
-
-        <UserMenuDropdown
-          isOpen={isUserMenuOpen}
-          onClose={() => setIsUserMenuOpen(false)}
-          userName={userName}
-          userEmail={user?.email || (isGuest ? "Guest session" : "Signed in")}
-          interfaceLanguage={preferences.interfaceLanguage || "English"}
-          showInstallOption={!isStandalone && !isInstalled && (isInstallSupported || canPromptInstall)}
-          onInstallPwa={() => triggerInstall()}
-          onOpenSettings={(tab, sub) => openSettingsAt(tab || "account", sub || "main")}
-          onLogout={logout}
-        />
+        </button>
       </div>
     </div>
   );
@@ -1117,7 +1073,13 @@ export const ChatScreen: React.FC = () => {
 
       {/* Mobile Drawer */}
       {isMobileMenuOpen && (
-        <div className="mobile-drawer-overlay" onClick={() => setIsMobileMenuOpen(false)}>
+        <div
+          className="mobile-drawer-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation menu"
+          onClick={() => setIsMobileMenuOpen(false)}
+        >
           <div className="mobile-drawer-pane" onClick={(e) => e.stopPropagation()}>
             {renderSidebarContent()}
           </div>
@@ -1153,6 +1115,19 @@ export const ChatScreen: React.FC = () => {
               <IconVolume size={18} />
             </button>
 
+            {/* Small Install App Icon Button (shown only when installable and not already installed) */}
+            {isInstallSupported && (
+              <button
+                type="button"
+                className="topbar-action-btn"
+                onClick={() => triggerInstall()}
+                aria-label="Install app"
+                title="Install app"
+              >
+                <IconDownload size={18} />
+              </button>
+            )}
+
             {/* If in Guest mode, show remaining messages pill and sign in */}
             {isGuest && (
               <div className="guest-counter-pill" title="Free guest messages remaining">
@@ -1174,7 +1149,7 @@ export const ChatScreen: React.FC = () => {
             <button
               type="button"
               className="topbar-action-btn"
-              onClick={() => openSettingsAt("account", "main")}
+              onClick={() => openSettings(null)}
               aria-label={t("settings")}
               title={`${t("settings")} (Ctrl+Shift+,)`}
             >
@@ -1208,7 +1183,7 @@ export const ChatScreen: React.FC = () => {
               <button
                 type="button"
                 className="wellbeing-break-link"
-                onClick={() => openSettingsAt("wellbeing", "main")}
+                onClick={() => openSettings("wellbeing", "main")}
               >
                 {t("secWellbeing")}
               </button>
@@ -1562,6 +1537,17 @@ export const ChatScreen: React.FC = () => {
                   </div>
 
                   <div className="input-toolbar-right">
+                    {/* Live Voice Call Button */}
+                    <button
+                      type="button"
+                      className="voice-call-launch-btn"
+                      onClick={handleLaunchVoiceCall}
+                      title="Start live voice call"
+                      aria-label="Start voice call"
+                    >
+                      <IconPhone size={15} />
+                    </button>
+
                     {/* Speech-to-Text Voice Input Button */}
                     <button
                       type="button"
@@ -1711,6 +1697,12 @@ export const ChatScreen: React.FC = () => {
                         )}
 
                         <div className={`message-bubble-box ${isUser ? "user-box" : "assistant-box"}`}>
+                          {msg.mediaType === "voice" && (
+                            <div className="msg-voice-tag" title="From live voice call">
+                              <IconPhone size={11} />
+                              <span>Voice</span>
+                            </div>
+                          )}
                           {/* User uploaded image thumbnails (supports up to 4 images) */}
                           {isUser && (msg.mediaUrls?.length || msg.mediaUrl) && (
                             <div className="user-uploaded-images-grid">
@@ -2269,6 +2261,17 @@ export const ChatScreen: React.FC = () => {
                 </div>
 
                 <div className="input-toolbar-right">
+                  {/* Live Voice Call */}
+                  <button
+                    type="button"
+                    className="voice-call-launch-btn"
+                    onClick={handleLaunchVoiceCall}
+                    title="Start live voice call"
+                    aria-label="Start voice call"
+                  >
+                    <IconPhone size={15} />
+                  </button>
+
                   {/* Microphone Speech-to-Text */}
                   <button
                     type="button"
@@ -2298,13 +2301,37 @@ export const ChatScreen: React.FC = () => {
         )}
       </div>
 
+      {/* Single Root Account Menu Portal (never duplicated between desktop/mobile sidebars) */}
+      <UserMenuDropdown
+        isOpen={isUserMenuOpen}
+        onClose={() => closeOverlay("accountMenu")}
+        anchorRef={accountAnchorRef}
+        userName={userName}
+        userEmail={user?.email || (isGuest ? "Guest session" : "Signed in")}
+        interfaceLanguage={preferences.interfaceLanguage || "English"}
+        showInstallOption={isInstallSupported}
+        onInstallPwa={() => {
+          triggerInstall();
+          if (!isIos) {
+            closeOverlay("accountMenu");
+          }
+        }}
+        onOpenSettings={(tab, sub) => openSettings(tab ?? null, sub || "main")}
+        onLogout={() => {
+          closeAllOverlays();
+          logout();
+        }}
+      />
+
       {/* Settings Modal */}
       <SettingsModal
-        isOpen={isSettingsOpen}
+        isOpen={route.isSettings}
+        isExactList={route.isExactSettingsList}
+        activeTab={route.settingsTab}
+        subView={route.settingsSubView}
+        onSelectSection={(tab, sub) => navigateSettings(tab, sub || "main")}
+        onBack={goBackFromSettings}
         onClose={closeSettings}
-        initialTab={settingsTab}
-        initialSubView={settingsSubView}
-        onTabChange={(tab, sub) => openSettingsAt(tab, sub || "main")}
       />
 
       {/* Project Management Modal */}
@@ -2317,22 +2344,39 @@ export const ChatScreen: React.FC = () => {
       {/* iOS Safari PWA Install Guide Sheet */}
       <PwaInstallModal />
 
-      {/* Calm Guest Limit Modal */}
+      {/* Live Voice Call Mode */}
+      <VoiceCallModal
+        isOpen={isVoiceCallOpen}
+        onClose={() => closeOverlay("voiceCall")}
+      />
+
+      {/* Calm Guest Limit / Voice Call Login Modal */}
       {showGuestLimitModal && (
-        <div className="modal-backdrop" onClick={() => setShowGuestLimitModal(false)}>
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            setGuestModalReason("limit");
+            setShowGuestLimitModal(false);
+          }}
+        >
           <div className="guest-limit-modal" onClick={(e) => e.stopPropagation()}>
             <div className="guest-modal-icon">
               <img src="/logo_icon.png?v=20261107" alt="AUTONEXIS" style={{ width: 44, height: 44 }} />
             </div>
-            <h3 className="guest-modal-title">Log in to continue</h3>
+            <h3 className="guest-modal-title">
+              {guestModalReason === "voiceCall" ? "Log in to use voice calls" : "Log in to continue"}
+            </h3>
             <p className="guest-modal-desc">
-              You've reached your free 5 guest messages. Sign in with your Google or email account to unlock unlimited messaging, multimodal image understanding, and persistent memory.
+              {guestModalReason === "voiceCall"
+                ? "Voice calls are available for signed-in users. Log in with your Google or email account to start a live voice call."
+                : "You've reached your free 5 guest messages. Sign in with your Google or email account to unlock unlimited messaging, multimodal image understanding, and persistent memory."}
             </p>
             <div className="guest-modal-actions">
               <button
                 type="button"
                 className="guest-modal-login-btn"
                 onClick={() => {
+                  setGuestModalReason("limit");
                   setShowGuestLimitModal(false);
                   setIsAuthScreenVisible(true);
                 }}
@@ -2342,7 +2386,10 @@ export const ChatScreen: React.FC = () => {
               <button
                 type="button"
                 className="guest-modal-close-btn"
-                onClick={() => setShowGuestLimitModal(false)}
+                onClick={() => {
+                  setGuestModalReason("limit");
+                  setShowGuestLimitModal(false);
+                }}
               >
                 Maybe later
               </button>

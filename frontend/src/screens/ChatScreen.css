@@ -245,7 +245,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.4rem 0.5rem;
+  min-height: 44px;
+  padding: 0.45rem 0.6rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background-color var(--transition-fast);
@@ -366,12 +367,43 @@
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
+  min-width: 36px;
+  min-height: 36px;
   padding: 6px;
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all var(--transition-fast);
+}
+
+@media (max-width: 640px) {
+  .chat-topbar {
+    padding: 0.45rem 0.6rem;
+  }
+  .topbar-right {
+    gap: 4px;
+    min-width: 0;
+  }
+  .guest-counter-pill {
+    font-size: 0.68rem;
+    padding: 3px 6px;
+    white-space: nowrap;
+  }
+  .topbar-signin-pill {
+    font-size: 0.72rem;
+    padding: 5px 8px;
+    white-space: nowrap;
+  }
+  .mobile-menu-trigger,
+  .topbar-action-btn {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
 }
 
 .topbar-action-btn:hover {
@@ -557,8 +589,9 @@
   gap: 8px;
 }
 
-/* Voice Input Mic Button */
-.voice-mic-btn {
+/* Voice Input Mic & Live Call Launch Buttons */
+.voice-mic-btn,
+.voice-call-launch-btn {
   background: transparent;
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
@@ -572,10 +605,35 @@
   transition: all var(--transition-fast);
 }
 
-.voice-mic-btn:hover {
+.voice-mic-btn:hover,
+.voice-call-launch-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
   background-color: var(--surface-raised);
+}
+
+@media (max-width: 640px) {
+  .voice-mic-btn,
+  .voice-call-launch-btn {
+    min-width: 40px;
+    min-height: 40px;
+    width: 40px;
+    height: 40px;
+  }
+}
+
+.msg-voice-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  margin-bottom: 6px;
 }
 
 .voice-mic-btn.listening {

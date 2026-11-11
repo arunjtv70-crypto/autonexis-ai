@@ -849,16 +849,67 @@ input:checked + .settings-switch-slider:before {
   margin: 0;
 }
 
+.settings-search-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0.25rem;
+}
+
+.settings-search-match-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: background-color var(--transition-fast);
+}
+
+.settings-search-match-btn:hover,
+.settings-search-match-btn:focus-visible {
+  background-color: var(--surface-raised);
+}
+
+.settings-search-match-title {
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.settings-search-match-path {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.settings-pane-title:focus {
+  outline: none;
+}
+
+.settings-list-mobile-topbar {
+  display: none;
+}
+
 .settings-mobile-back-btn {
   display: none;
   align-items: center;
   gap: 4px;
+  min-height: 44px;
+  min-width: 44px;
   background: transparent;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  padding: 0.35rem 0.65rem;
-  font-size: 0.82rem;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.86rem;
   cursor: pointer;
 }
 
@@ -1127,6 +1178,9 @@ input:checked + .settings-switch-slider:before {
     flex-direction: column;
     height: 100%;
     max-height: 100%;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
     margin: 0;
     border-radius: 0;
   }
@@ -1143,6 +1197,8 @@ input:checked + .settings-switch-slider:before {
     width: 100%;
     min-width: 100%;
     flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     border-right: none;
     border-bottom: none;
     padding: 0.75rem 0.65rem 1.5rem;
@@ -1169,6 +1225,20 @@ input:checked + .settings-switch-slider:before {
 
   .settings-mobile-back-btn {
     display: inline-flex;
+  }
+
+  .settings-list-mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .settings-list-mobile-title {
+    font-size: 1.05rem;
+    font-weight: 500;
+    color: var(--text-primary);
   }
 
   .settings-sidebar-bottom {
@@ -1207,6 +1277,27 @@ input:checked + .settings-switch-slider:before {
 
   .settings-pill-group {
     flex-wrap: wrap;
+  }
+
+  .settings-pill-btn {
+    min-height: 44px;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.86rem;
+  }
+
+  .settings-icon-action-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .settings-toggle-btn {
+    position: relative;
+  }
+
+  .settings-toggle-btn::after {
+    content: "";
+    position: absolute;
+    inset: -10px -4px;
   }
 
   .settings-style-card-top {

@@ -1,18 +1,31 @@
+.user-menu-portal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  pointer-events: none;
+}
+
 .user-menu-mobile-backdrop {
-  display: none;
+  display: block;
+  position: fixed;
+  inset: 0;
+  background: transparent;
+  pointer-events: auto;
+  z-index: 1200;
 }
 
 .user-menu-dropdown {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
+  position: fixed;
+  bottom: var(--menu-bottom, 68px);
+  left: var(--menu-left, 12px);
   width: 272px;
+  pointer-events: auto;
   background-color: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
   padding: 6px;
-  z-index: 1000;
+  z-index: 1205;
   animation: userMenuFadeIn 0.15s ease-out;
   backdrop-filter: blur(12px);
 }
@@ -171,7 +184,8 @@
     position: fixed;
     inset: 0;
     background-color: rgba(0, 0, 0, 0.55);
-    z-index: 1090;
+    z-index: 1200;
+    pointer-events: auto;
     backdrop-filter: blur(2px);
   }
 
@@ -188,7 +202,7 @@
     border-radius: 18px 18px 0 0;
     border-bottom: none;
     padding: 8px 12px calc(14px + env(safe-area-inset-bottom, 0px));
-    z-index: 1100;
+    z-index: 1205;
     animation: userMenuSheetUp 0.2s ease-out;
   }
 
@@ -207,7 +221,7 @@
   }
 
   .user-menu-subitem {
-    min-height: 40px;
+    min-height: 44px;
     font-size: 0.88rem;
   }
 }
