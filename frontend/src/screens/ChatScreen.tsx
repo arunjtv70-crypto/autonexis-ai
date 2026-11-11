@@ -378,6 +378,28 @@ export const ChatScreen: React.FC = () => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [createNewChat, isSettingsOpen, hasOverlay, pushOverlay, closeOverlay, openSettings, closeSettings, setShowGuestLimitModal]);
 
+  // Handle manifest shortcuts (?action=new-chat | ?action=create-image) once on mount
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const action = params.get("action");
+      if (action === "new-chat") {
+        createNewChat();
+      } else if (action === "create-image") {
+        createNewChat();
+        setInputMode("image");
+      }
+      if (action) {
+        params.delete("action");
+        const remaining = params.toString();
+        const nextUrl = window.location.pathname + (remaining ? `?${remaining}` : "");
+        window.history.replaceState(window.history.state, "", nextUrl);
+      }
+    } catch {}
+    // Run intentionally once on mount for shortcut launches
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Setup Web Speech Recognition (STT)
   useEffect(() => {
     const win = window as unknown as IWindow;
@@ -1234,6 +1256,7 @@ export const ChatScreen: React.FC = () => {
               <button
                 type="button"
                 className="topbar-action-btn"
+                data-browser-only="true"
                 onClick={() => triggerInstall()}
                 aria-label="Install app"
                 title="Install app"
@@ -1343,7 +1366,7 @@ export const ChatScreen: React.FC = () => {
 
         {/* Post-login Subtle Dismissible PWA Install Banner (never shown to guests, at most once/week) */}
         {showInstallBanner && (
-          <div className="pwa-install-banner" role="region" aria-label="Install app">
+          <div className="pwa-install-banner" data-browser-only="true" role="region" aria-label="Install app">
             <div className="pwa-install-banner-left">
               <IconSmartphone size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
               <span>

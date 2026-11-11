@@ -6,9 +6,18 @@
 
 export const APP_NAME = "AUTONEXIS Assistant";
 export const APP_SHORT_NAME = "AUTONEXIS";
+export const APP_TAGLINE = "Your AI Assistant";
 export const APP_VERSION = "v2.5.0";
 export const SUPPORT_EMAIL = "";
 export const BRAND_FONT_EVERYWHERE = false;
+export const LEGAL_DRAFT_NOTICE = "Draft, to be reviewed before launch";
+
+export const FEATURE_FLAGS = {
+  chat: true,
+  images: true,
+  voice: true,
+  files: true,
+} as const;
 
 // Base URL from environment or relative /api for unified single-origin serving
 export const API_BASE_URL = (

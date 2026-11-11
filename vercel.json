@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "buildCommand": "node build.js",
   "outputDirectory": "frontend/dist",
   "functions": {
@@ -6,6 +7,21 @@
       "maxDuration": 60
     }
   },
+  "headers": [
+    {
+      "source": "/.well-known/assetlinks.json",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/json; charset=utf-8"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=300"
+        }
+      ]
+    }
+  ],
   "rewrites": [
     {
       "source": "/api",
@@ -16,7 +32,7 @@
       "destination": "/api/index.py"
     },
     {
-      "source": "/((?!api/|assets/|brand/|fonts/|favicon.*|icon-.*|logo.*|apple-touch-.*|manifest.*|sw\\.js|.*\\..*).*)",
+      "source": "/((?!api/|assets/|brand/|fonts/|icons/|screenshots/|\\.well-known/|robots\\.txt|sitemap\\.xml|favicon.*|icon-.*|logo.*|apple-touch-.*|manifest.*|sw\\.js|.*\\..*).*)",
       "destination": "/index.html"
     }
   ]

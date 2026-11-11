@@ -61,11 +61,21 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const resolvedTheme: ResolvedTheme = theme === "auto" ? systemTheme : theme;
 
-  // Apply data-theme attribute on <html> element
+  // Apply data-theme attribute and status bar theme-color on <html>
   useEffect(() => {
     const root = document.documentElement;
     root.setAttribute("data-theme", resolvedTheme);
     root.style.colorScheme = resolvedTheme;
+
+    const statusBarColor = resolvedTheme === "light" ? "#F8F8FA" : "#0C0C0E";
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute("content", statusBarColor);
+    }
+    const metaApple = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+    if (metaApple) {
+      metaApple.setAttribute("content", resolvedTheme === "light" ? "default" : "black");
+    }
   }, [resolvedTheme]);
 
   const setTheme = (choice: ThemeChoice) => {

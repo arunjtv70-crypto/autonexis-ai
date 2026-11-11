@@ -1,5 +1,5 @@
 // AUTONEXIS Service Worker - Branded Offline & Fresh Shell Guard
-const CACHE_NAME = 'autonexis-v20261111-brand';
+const CACHE_NAME = 'autonexis-v20261111-app-v2';
 
 const PRECACHE_URLS = [
   '/',

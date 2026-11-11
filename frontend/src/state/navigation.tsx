@@ -24,6 +24,21 @@ const VALID_SETTINGS_SECTIONS = new Set<SettingsTabId>([
   "about",
 ]);
 
+export type LegalPageId =
+  | "privacy"
+  | "terms"
+  | "support"
+  | "delete-account"
+  | "about";
+
+const VALID_LEGAL_PAGES = new Set<LegalPageId>([
+  "privacy",
+  "terms",
+  "support",
+  "delete-account",
+  "about",
+]);
+
 const VALID_SUBVIEWS = new Set<SettingsSubView>([
   "terms",
   "privacy",
@@ -37,6 +52,7 @@ export interface ParsedRoute {
   isSettings: boolean;
   isExactSettingsList: boolean;
   isNotFound: boolean;
+  legalPage: LegalPageId | null;
   settingsTab: SettingsTabId;
   settingsSubView: SettingsSubView;
 }
@@ -56,6 +72,21 @@ export function parseAppRoute(rawPath: string): ParsedRoute {
       isSettings: false,
       isExactSettingsList: false,
       isNotFound: false,
+      legalPage: null,
+      settingsTab: "account",
+      settingsSubView: "main",
+    };
+  }
+
+  const legalCandidate = pathname.slice(1) as LegalPageId;
+  if (VALID_LEGAL_PAGES.has(legalCandidate)) {
+    return {
+      pathname,
+      isChat: false,
+      isSettings: false,
+      isExactSettingsList: false,
+      isNotFound: false,
+      legalPage: legalCandidate,
       settingsTab: "account",
       settingsSubView: "main",
     };
@@ -68,6 +99,7 @@ export function parseAppRoute(rawPath: string): ParsedRoute {
       isSettings: true,
       isExactSettingsList: true,
       isNotFound: false,
+      legalPage: null,
       settingsTab: "account",
       settingsSubView: "main",
     };
@@ -84,6 +116,7 @@ export function parseAppRoute(rawPath: string): ParsedRoute {
           isSettings: true,
           isExactSettingsList: false,
           isNotFound: false,
+          legalPage: null,
           settingsTab: sec,
           settingsSubView: "main",
         };
@@ -99,6 +132,7 @@ export function parseAppRoute(rawPath: string): ParsedRoute {
           isSettings: true,
           isExactSettingsList: false,
           isNotFound: false,
+          legalPage: null,
           settingsTab: sec,
           settingsSubView: sub,
         };
@@ -112,6 +146,7 @@ export function parseAppRoute(rawPath: string): ParsedRoute {
     isSettings: false,
     isExactSettingsList: false,
     isNotFound: true,
+    legalPage: null,
     settingsTab: "account",
     settingsSubView: "main",
   };
@@ -139,6 +174,8 @@ interface NavigationContextValue {
   navigateSettings: (tab: SettingsTabId, subView?: SettingsSubView) => void;
   goBackFromSettings: () => void;
   closeSettings: () => void;
+  navigateTo: (path: string, replace?: boolean) => void;
+  goBackOrHome: () => void;
   goHome: (replace?: boolean) => void;
 }
 
@@ -159,7 +196,7 @@ export const NavigationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         overlays: [],
       };
       try {
-        window.history.replaceState(rootSnap, "", initialPath);
+        window.history.replaceState(rootSnap, "", initialPath + (window.location.search || ""));
       } catch {}
       return rootSnap;
     }
@@ -244,6 +281,67 @@ export const NavigationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Keep any same-origin app links inside the SPA/PWA/TWA instead of bouncing out to a new browser load
+  useEffect(() => {
+    const onDocClick = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor) return;
+      if (anchor.hasAttribute("download")) return;
+      const targetAttr = (anchor.getAttribute("target") || "").trim().toLowerCase();
+      if (targetAttr && targetAttr !== "_self") return;
+
+      const rawHref = anchor.getAttribute("href") || "";
+      if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("mailto:") || rawHref.startsWith("tel:")) {
+        return;
+      }
+
+      try {
+        const resolved = new URL(anchor.href, window.location.href);
+        if (resolved.origin !== window.location.origin) return;
+        const parsed = parseAppRoute(resolved.pathname);
+        if (parsed.legalPage || parsed.isSettings || parsed.pathname === "/") {
+          event.preventDefault();
+          const norm = normalizePathname(resolved.pathname);
+          if (snapshotRef.current.path !== norm || snapshotRef.current.overlays.length > 0) {
+            const nextSeq = ++maxSeqRef.current;
+            const nextSnap: HistorySnapshot = {
+              __autonexis: true,
+              sessionId: PAGE_SESSION_ID,
+              seq: nextSeq,
+              path: norm,
+              overlays: [],
+            };
+            seqPathMapRef.current.set(nextSeq, norm);
+            try {
+              window.history.pushState(nextSnap, "", norm + resolved.search + resolved.hash);
+            } catch {}
+            snapshotRef.current = nextSnap;
+            setSnapshot(nextSnap);
+            try {
+              window.scrollTo({ top: 0 });
+            } catch {}
+          }
+        }
+      } catch {
+        // Ignore malformed URLs
+      }
+    };
+
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
   }, []);
 
   const commitPush = useCallback((nextPath: string, nextOverlays: AppOverlayId[]) => {
@@ -447,6 +545,36 @@ export const NavigationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     });
   }, [commitReplace, runSerialized, waitHistoryGo]);
 
+  const navigateTo = useCallback(
+    (path: string, replace = false) => {
+      if (pendingBackLockRef.current) return;
+      const norm = normalizePathname(path);
+      if (snapshotRef.current.path === norm && snapshotRef.current.overlays.length === 0) {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      if (replace) {
+        commitReplace(norm, []);
+      } else {
+        commitPush(norm, []);
+      }
+      try {
+        window.scrollTo({ top: 0 });
+      } catch {}
+    },
+    [commitPush, commitReplace]
+  );
+
+  const goBackOrHome = useCallback(() => {
+    if (pendingBackLockRef.current) return;
+    const cur = snapshotRef.current;
+    if (cur.seq > 0 && seqPathMapRef.current.has(cur.seq - 1)) {
+      runSerialized(() => waitHistoryGo(-1));
+    } else {
+      commitReplace("/", []);
+    }
+  }, [commitReplace, runSerialized, waitHistoryGo]);
+
   const goHome = useCallback(
     (replace = false) => {
       if (pendingBackLockRef.current) return;
@@ -460,6 +588,18 @@ export const NavigationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   );
 
   const route = parseAppRoute(snapshot.path);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const fullCanonical = window.location.origin + route.pathname;
+      const canEl = document.getElementById("canonical-link");
+      if (canEl) canEl.setAttribute("href", fullCanonical);
+      const ogUrlEl = document.getElementById("og-url-meta");
+      if (ogUrlEl) ogUrlEl.setAttribute("content", fullCanonical);
+    } catch {}
+  }, [route.pathname]);
+
   const hasOverlay = useCallback(
     (id: AppOverlayId) => snapshot.overlays.includes(id),
     [snapshot.overlays]
@@ -478,6 +618,8 @@ export const NavigationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         navigateSettings,
         goBackFromSettings,
         closeSettings,
+        navigateTo,
+        goBackOrHome,
         goHome,
       }}
     >

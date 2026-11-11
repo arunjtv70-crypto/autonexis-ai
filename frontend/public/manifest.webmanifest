@@ -1,14 +1,16 @@
 {
   "name": "AUTONEXIS Assistant",
   "short_name": "AUTONEXIS",
-  "description": "AUTONEXIS Assistant — Thoughtful, Private AI Assistant",
+  "description": "AUTONEXIS Assistant — Your calm, private space for everyday thinking, voice conversations, image creation, and file understanding.",
   "id": "/",
-  "start_url": "/",
+  "start_url": "/?source=app",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "background_color": "#000000",
   "theme_color": "#000000",
-  "orientation": "portrait-primary",
+  "orientation": "any",
+  "categories": ["productivity", "utilities"],
   "icons": [
     { "src": "/icons/icon-48.png", "sizes": "48x48", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-72.png", "sizes": "72x72", "type": "image/png", "purpose": "any" },
@@ -23,5 +25,44 @@
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
     { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "New chat",
+      "short_name": "New chat",
+      "description": "Start a new private conversation",
+      "url": "/?source=app&action=new-chat",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Create image",
+      "short_name": "Create image",
+      "description": "Generate an image in Image Studio",
+      "url": "/?source=app&action=create-image",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/phone-chat-dark.png",
+      "sizes": "540x960",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "AUTONEXIS Assistant mobile chat workspace"
+    },
+    {
+      "src": "/screenshots/phone-voice-dark.png",
+      "sizes": "540x960",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "AUTONEXIS Assistant conversation and controls"
+    },
+    {
+      "src": "/screenshots/wide-workspace-dark.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "AUTONEXIS Assistant desktop workspace"
+    }
   ]
 }

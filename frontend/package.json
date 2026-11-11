@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:assetlinks": "node ../scripts/check-assetlinks.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.1.2",

@@ -7,6 +7,8 @@
     "start": "python run.py",
     "dev": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",
-    "preview": "npm --prefix frontend run preview"
+    "preview": "npm --prefix frontend run preview",
+    "check:assetlinks": "node scripts/check-assetlinks.mjs",
+    "capture:screenshots": "node scripts/capture-screenshots.mjs"
   }
 }

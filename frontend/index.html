@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="hi" data-theme="dark">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -9,15 +9,20 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="AUTONEXIS" />
 
-    <title>AUTONEXIS Assistant</title>
-    <meta name="description" content="AUTONEXIS Assistant — Thoughtful, quiet, and intelligent AI assistant." />
+    <title>AUTONEXIS Assistant — Your AI Assistant</title>
+    <meta name="description" content="AUTONEXIS Assistant — Your calm, private space for everyday thinking, voice conversations, image creation, and file understanding." />
+    <link rel="canonical" id="canonical-link" href="https://autonexis.vercel.app/" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="AUTONEXIS Assistant" />
-    <meta property="og:description" content="Thoughtful, quiet, and intelligent AI assistant." />
+    <meta property="og:site_name" content="AUTONEXIS Assistant" />
+    <meta property="og:title" content="AUTONEXIS Assistant — Your AI Assistant" />
+    <meta property="og:description" content="Your calm, private space for everyday thinking, voice conversations, image creation, and file understanding." />
+    <meta property="og:url" id="og-url-meta" content="https://autonexis.vercel.app/" />
     <meta property="og:image" content="/brand/og-image.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="AUTONEXIS Assistant — Your AI Assistant" />
+    <meta name="twitter:description" content="Your calm, private space for everyday thinking, voice conversations, image creation, and file understanding." />
     <meta name="twitter:image" content="/brand/og-image.png" />
 
     <!-- Icons & PWA Manifest -->
@@ -206,9 +211,37 @@
       }
     </style>
 
-    <!-- Cold-start detection + anti-flash theme setup before first paint -->
+    <!-- App-mode detection + Cold-start + Anti-flash theme + Canonical URL setup BEFORE first paint -->
     <script>
       (function() {
+        try {
+          var urlParams = new URLSearchParams(window.location.search || "");
+          var isStandaloneMq = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
+          var isNavStandalone = window.navigator && window.navigator.standalone === true;
+          var isSourceApp = urlParams.get("source") === "app";
+          var isAndroidRef = typeof document.referrer === "string" && document.referrer.indexOf("android-app://") === 0;
+          var liveApp = !!(isStandaloneMq || isNavStandalone || isSourceApp || isAndroidRef);
+          if (liveApp) {
+            try { localStorage.setItem("autonexis_app_mode", "1"); } catch (err) {}
+          }
+          var persistedApp = false;
+          try { persistedApp = localStorage.getItem("autonexis_app_mode") === "1"; } catch (err) {}
+          var isApp = liveApp || persistedApp;
+          document.documentElement.setAttribute("data-app-mode", isApp ? "true" : "false");
+        } catch (e) {
+          document.documentElement.setAttribute("data-app-mode", "false");
+        }
+
+        try {
+          if (window.location && window.location.origin) {
+            var currentCanonical = window.location.origin + (window.location.pathname || "/");
+            var canEl = document.getElementById("canonical-link");
+            if (canEl) canEl.setAttribute("href", currentCanonical);
+            var ogUrlEl = document.getElementById("og-url-meta");
+            if (ogUrlEl) ogUrlEl.setAttribute("content", currentCanonical);
+          }
+        } catch (e) {}
+
         var isColdStart = true;
         try {
           isColdStart = sessionStorage.getItem("autonexis_splash_done") !== "1";

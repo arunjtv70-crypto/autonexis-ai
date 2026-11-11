@@ -8,7 +8,11 @@ import "./AuthScreen.css";
 
 type AuthTab = "email" | "phone";
 
-export const AuthScreen: React.FC = () => {
+interface AuthScreenProps {
+  embedded?: boolean;
+}
+
+export const AuthScreen: React.FC<AuthScreenProps> = ({ embedded = false }) => {
   const { loginEmail, signupEmail, loginGoogle, sendPasswordReset, continueAsGuest, isLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<AuthTab>("email");
@@ -84,16 +88,22 @@ export const AuthScreen: React.FC = () => {
   };
 
   return (
-    <div className="auth-screen">
+    <div className={embedded ? "auth-embedded-wrap" : "auth-screen"}>
       {/* Background Watermark */}
-      <div className="auth-watermark" aria-hidden="true">
-        AUTONEXIS
-      </div>
+      {!embedded && (
+        <div className="auth-watermark" aria-hidden="true">
+          AUTONEXIS
+        </div>
+      )}
 
-      <div className="auth-card">
+      <div className={embedded ? "auth-card auth-card-embedded" : "auth-card"}>
         {/* Brand Header */}
         <div className="auth-header">
-          <Logo variant="full" size="lg" layout="stacked" showSubtitle={true} />
+          {!embedded ? (
+            <Logo variant="full" size="lg" layout="stacked" showSubtitle={true} />
+          ) : (
+            <h2 className="auth-embedded-heading">Sign in or try as guest</h2>
+          )}
           <p className="auth-subtext">
             Thoughtful, quiet and intelligent AI assistant
           </p>
@@ -272,9 +282,11 @@ export const AuthScreen: React.FC = () => {
         </div>
 
         {/* Footer */}
-        <footer className="auth-footer-note">
-          <span>AUTONEXIS Assistant • Private and Thoughtful AI</span>
-        </footer>
+        {!embedded && (
+          <footer className="auth-footer-note">
+            <span>AUTONEXIS Assistant • Private and Thoughtful AI</span>
+          </footer>
+        )}
       </div>
     </div>
   );

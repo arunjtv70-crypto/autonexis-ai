@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { useAppNavigation } from "./navigation";
+import { isAppMode } from "../utils/appMode";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -23,13 +24,7 @@ if (typeof window !== "undefined") {
 
 function checkIsStandalone(): boolean {
   if (typeof window === "undefined") return false;
-  try {
-    const mq = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
-    const navStandalone = (window.navigator as any).standalone === true;
-    return !!(mq || navStandalone);
-  } catch {
-    return false;
-  }
+  return isAppMode();
 }
 
 function detectIosInfo(): { isIos: boolean; isIosNonSafari: boolean } {

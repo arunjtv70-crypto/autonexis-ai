@@ -146,3 +146,49 @@ html[data-reduce-motion="true"] *::after {
   scroll-behavior: auto !important;
 }
 
+/* Installed App / TWA Mode Polish (standalone PWA + Android TWA) */
+html[data-app-mode="true"] [data-browser-only="true"],
+html[data-app-mode="true"] .pwa-install-banner {
+  display: none !important;
+}
+
+html[data-app-mode="true"],
+html[data-app-mode="true"] body {
+  overscroll-behavior-y: contain;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html[data-app-mode="true"] .chat-screen-layout,
+html[data-app-mode="true"] .messages-scroll-area,
+html[data-app-mode="true"] .settings-modal-content {
+  overscroll-behavior-y: contain;
+}
+
+/* Native-feeling chrome: prevent accidental text selection on UI controls while keeping messages & inputs selectable */
+html[data-app-mode="true"] button,
+html[data-app-mode="true"] nav,
+html[data-app-mode="true"] [role="tablist"],
+html[data-app-mode="true"] [role="tab"],
+html[data-app-mode="true"] .desktop-sidebar,
+html[data-app-mode="true"] .mobile-drawer-pane,
+html[data-app-mode="true"] .chat-topbar,
+html[data-app-mode="true"] .settings-sidebar,
+html[data-app-mode="true"] .settings-modal-header,
+html[data-app-mode="true"] .user-menu-dropdown {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html[data-app-mode="true"] input,
+html[data-app-mode="true"] textarea,
+html[data-app-mode="true"] [contenteditable="true"],
+html[data-app-mode="true"] .message-text-content,
+html[data-app-mode="true"] .markdown-body,
+html[data-app-mode="true"] .message-bubble-box,
+html[data-app-mode="true"] .legal-page-content,
+html[data-app-mode="true"] code,
+html[data-app-mode="true"] pre {
+  -webkit-user-select: text;
+  user-select: text;
+}
+

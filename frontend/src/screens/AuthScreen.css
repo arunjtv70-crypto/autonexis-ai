@@ -1,12 +1,31 @@
 .auth-screen {
   position: relative;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 1.5rem 1rem;
+  padding: max(1.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
   background-color: var(--bg);
   overflow: hidden;
+}
+
+.auth-embedded-wrap {
+  width: 100%;
+}
+
+.auth-card-embedded {
+  max-width: 440px;
+  padding: 1.75rem 1.5rem;
+}
+
+.auth-embedded-heading {
+  font-family: var(--font-brand);
+  font-size: 1.05rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  margin: 0;
 }
 
 .auth-watermark {

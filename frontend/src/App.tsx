@@ -1,10 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState } from "react";
 import { useAuth } from "./state/auth";
 import { useAppNavigation } from "./state/navigation";
+import { isAppMode } from "./utils/appMode";
 import { AuthScreen } from "./screens/AuthScreen";
+import { LandingScreen } from "./screens/LandingScreen";
 import { ChatScreen } from "./screens/ChatScreen";
 import { Skeleton } from "./components/Skeleton";
 import { NotFoundScreen } from "./components/NotFoundScreen";
+
+const LegalPageScreen = React.lazy(() =>
+  import("./screens/LegalPageScreen").then((m) => ({ default: m.LegalPageScreen }))
+);
 
 const SPLASH_SESSION_KEY = "autonexis_splash_done";
 
@@ -87,8 +93,29 @@ export const AppContent: React.FC = () => {
     );
   }
 
-  // If Auth screen is requested or user is not logged in and not guest, show AuthScreen
-  if (isAuthScreenVisible || (!user && !isGuest)) {
+  // Legal & informational pages are accessible both logged in and logged out
+  if (route.legalPage) {
+    return (
+      <Suspense fallback={null}>
+        <LegalPageScreen page={route.legalPage} />
+      </Suspense>
+    );
+  }
+
+  // Logged-out visitor: wrap AuthScreen inside LandingScreen in browser mode; straight to AuthScreen in app mode
+  if (!user && !isGuest) {
+    const appMode = isAppMode();
+    if (!appMode && route.isNotFound) {
+      return <NotFoundScreen />;
+    }
+    if (!appMode) {
+      return <LandingScreen />;
+    }
+    return <AuthScreen />;
+  }
+
+  // If Guest explicitly clicked Sign In inside Chat, show AuthScreen cleanly
+  if (isAuthScreenVisible) {
     return <AuthScreen />;
   }
 

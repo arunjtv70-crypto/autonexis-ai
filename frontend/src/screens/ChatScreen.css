@@ -2188,3 +2188,33 @@
     padding: 6px 10px;
   }
 }
+
+/* Safe-Area Insets for App Mode / Notched Mobile Displays */
+html[data-app-mode="true"] .chat-topbar {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+  padding-left: max(1.5rem, env(safe-area-inset-left));
+  padding-right: max(1.5rem, env(safe-area-inset-right));
+}
+
+@media (max-width: 640px) {
+  html[data-app-mode="true"] .chat-topbar {
+    padding-top: max(0.45rem, env(safe-area-inset-top));
+    padding-left: max(0.5rem, env(safe-area-inset-left));
+    padding-right: max(0.5rem, env(safe-area-inset-right));
+  }
+}
+
+html[data-app-mode="true"] .conversation-input-bar {
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+}
+
+html[data-app-mode="true"] .mobile-drawer-pane {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+html[data-app-mode="true"] .desktop-sidebar .sidebar-inner {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
