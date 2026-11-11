@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     voice_rpm_limit: int = 10
     voice_daily_minutes_limit: float = 15.0
 
+    # Optional Image Generation Settings (hardcoded defaults; optional IMAGE_API_KEY)
+    image_api_key: str = ""
+    image_api_base_url: str = "https://gen.pollinations.ai"
+    image_anon_base_url: str = "https://image.pollinations.ai"
+    image_cooldown_seconds: int = 15
+    image_hourly_limit: int = 10
+    image_daily_limit: int = 30
+
     # Firebase Authentication
     firebase_project_id: str = "autonexis-ai-assistant-7a2e7"
 

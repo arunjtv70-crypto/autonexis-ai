@@ -17,7 +17,7 @@ import { UserMenuDropdown } from "../components/UserMenuDropdown";
 import { VoiceCallModal } from "../components/VoiceCallModal";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { translate } from "../i18n/translations";
-import type { FirestoreProject } from "../db";
+import { getStorageDebugTraces, type FirestoreProject } from "../db";
 import {
   isImageFile,
   isTextFile,
@@ -103,6 +103,18 @@ export const ChatScreen: React.FC = () => {
     deleteChat,
     renameChat,
     sendMessage,
+    imageStyle,
+    setImageStyle,
+    imageAspect,
+    setImageAspect,
+    loadLazyImageForMessage,
+    regenerateMessageImage,
+    deleteMessageImage,
+    reportMessageImage,
+    getFullQualityImageUrl,
+    deleteErrorBanner,
+    retryFailedDelete,
+    dismissDeleteError,
     isSending,
     guestMessagesRemaining,
     showGuestLimitModal,
@@ -143,6 +155,10 @@ export const ChatScreen: React.FC = () => {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const accountAnchorRef = useRef<HTMLButtonElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const isDebugMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("debug") === "1";
+  const [debugTraceDismissed, setDebugTraceDismissed] = useState(false);
 
   // Coordinated history-backed overlay states
   const isMobileMenuOpen = hasOverlay("drawer");
@@ -509,7 +525,12 @@ export const ChatScreen: React.FC = () => {
       };
     }
 
-    await sendMessage(textToSend, inputMode, attachmentPayload);
+    await sendMessage(
+      textToSend,
+      inputMode,
+      attachmentPayload,
+      inputMode === "image" ? { style: imageStyle, aspect: imageAspect } : undefined
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1059,6 +1080,85 @@ export const ChatScreen: React.FC = () => {
     </div>
   );
 
+  const imageStyleOptions = [
+    "Auto",
+    "Realistic photo",
+    "Cinematic",
+    "Illustration",
+    "Anime",
+    "3D render",
+    "Minimal logo",
+  ];
+  const imageAspectOptions = ["Auto", "1:1", "4:5", "16:9", "9:16"];
+
+  const renderImageModeControls = () => {
+    if (inputMode !== "image") return null;
+    return (
+      <div className="image-mode-controls-bar" role="region" aria-label="Image creation options">
+        <div className="image-mode-header-row">
+          <span className="image-mode-active-badge">
+            <IconImage size={12} />
+            <span>Creating image</span>
+          </span>
+          <button
+            type="button"
+            className="image-mode-exit-btn"
+            onClick={() => setInputMode("chat")}
+            aria-label="Exit Create image mode"
+            title="Exit Create image mode"
+          >
+            ✕ Exit
+          </button>
+        </div>
+
+        <div className="image-mode-pills-scroll" aria-label="Image style">
+          {imageStyleOptions.map((st) => (
+            <button
+              key={st}
+              type="button"
+              className={`image-mode-chip ${imageStyle === st ? "active" : ""}`}
+              onClick={() => setImageStyle(st)}
+            >
+              {st}
+            </button>
+          ))}
+        </div>
+
+        <div className="image-mode-pills-scroll" aria-label="Image aspect ratio">
+          {imageAspectOptions.map((ar) => (
+            <button
+              key={ar}
+              type="button"
+              className={`image-mode-chip aspect ${imageAspect === ar ? "active" : ""}`}
+              onClick={() => setImageAspect(ar)}
+            >
+              {ar === "Auto" ? "Ratio: Auto" : ar}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderDeleteErrorBanner = () => {
+    if (!deleteErrorBanner) return null;
+    return (
+      <div className="delete-error-banner" role="alert">
+        <span>{deleteErrorBanner.message}</span>
+        <div className="delete-error-banner-actions">
+          <button type="button" className="delete-error-retry-btn" onClick={retryFailedDelete}>
+            Retry
+          </button>
+          <button type="button" className="delete-error-dismiss-btn" onClick={dismissDeleteError}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const debugTraces = isDebugMode ? getStorageDebugTraces() : [];
+
   return (
     <div className="chat-screen-layout">
       {/* Background Subtle Watermark */}
@@ -1274,60 +1374,64 @@ export const ChatScreen: React.FC = () => {
           style={{ display: "none" }}
         />
 
-        {/* Scrollable Conversation / Home Area */}
-        <main
-          className="chat-conversation-area"
-          ref={chatScrollRef}
-          onScroll={handleScroll}
-        >
-          {!activeChat || activeChat.messages.length === 0 ? (
-            /* ==============================================================
-               INSPIRATION-ALIGNED HOME SCREEN (AUTONEXIS AESTHETIC)
-               ============================================================== */
-            <div className="chat-home-container">
-              {/* Brand Mark + Greeting */}
-              <div className="home-greeting-section">
-                <Logo variant="full" size="md" layout="stacked" showSubtitle={false} />
-                <h1 className="home-greeting-title">
-                  {t("backAtIt")}, {userName}
-                </h1>
-              </div>
-
-              {firestoreError && (
-                <div
-                  style={{
-                    padding: "6px 14px",
-                    fontSize: "0.78rem",
-                    backgroundColor: "rgba(234, 179, 8, 0.12)",
-                    color: "var(--text-secondary, #eab308)",
-                    borderRadius: "6px",
-                    textAlign: "center",
-                    marginBottom: "10px",
-                  }}
-                >
-                  {firestoreError}
+        {/* Scrollable Conversation / Home Stage + Floating Scroll-to-Latest Pill */}
+        <div className="chat-scroll-stage">
+          <main
+            className="chat-conversation-area"
+            ref={chatScrollRef}
+            onScroll={handleScroll}
+          >
+            {!activeChat || activeChat.messages.length === 0 ? (
+              /* ==============================================================
+                 INSPIRATION-ALIGNED HOME SCREEN (AUTONEXIS AESTHETIC)
+                 ============================================================== */
+              <div className="chat-home-container">
+                {/* Brand Mark + Greeting */}
+                <div className="home-greeting-section">
+                  <Logo variant="full" size="md" layout="stacked" showSubtitle={false} />
+                  <h1 className="home-greeting-title">
+                    {t("backAtIt")}, {userName}
+                  </h1>
                 </div>
-              )}
 
-              {/* Main Rounded Input Card */}
-              <div className="chat-input-card">
-                <textarea
-                  ref={textareaRef}
-                  rows={2}
-                  value={inputContent}
-                  onChange={(e) => setInputContent(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder={
-                    inputMode === "image"
-                      ? "Describe the visual you want to create with AUTONEXIS Image Studio..."
-                      : inputMode === "video"
-                      ? "Describe the cinematic scene for AUTONEXIS Video Studio..."
-                      : preferences.enterToSend === false
-                      ? t("askAnythingCtrlEnter")
-                      : t("howCanIHelp")
-                  }
-                  className="chat-input-textarea"
-                />
+                {firestoreError && (
+                  <div
+                    style={{
+                      padding: "6px 14px",
+                      fontSize: "0.78rem",
+                      backgroundColor: "rgba(234, 179, 8, 0.12)",
+                      color: "var(--text-secondary, #eab308)",
+                      borderRadius: "6px",
+                      textAlign: "center",
+                      marginBottom: "10px",
+                    }}
+                  >
+                    {firestoreError}
+                  </div>
+                )}
+
+                {renderDeleteErrorBanner()}
+
+                {/* Main Rounded Input Card */}
+                <div className="chat-input-card">
+                  {renderImageModeControls()}
+                  <textarea
+                    ref={textareaRef}
+                    rows={2}
+                    value={inputContent}
+                    onChange={(e) => setInputContent(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={
+                      inputMode === "image"
+                        ? "Describe the visual you want to create..."
+                        : inputMode === "video"
+                        ? "Describe the cinematic scene for Video Studio..."
+                        : preferences.enterToSend === false
+                        ? t("askAnythingCtrlEnter")
+                        : t("howCanIHelp")
+                    }
+                    className="chat-input-textarea"
+                  />
 
                 {/* Attached Images Thumbnails Preview (up to 4 images) */}
                 {attachedImages.length > 0 && (
@@ -1417,6 +1521,19 @@ export const ChatScreen: React.FC = () => {
 
                       {isHomeAttachmentMenuOpen && (
                         <div className="attachment-dropdown-menu">
+                          <button
+                            type="button"
+                            className={`attachment-dropdown-item ${inputMode === "image" ? "active" : ""}`}
+                            onClick={() => {
+                              setInputMode(inputMode === "image" ? "chat" : "image");
+                              setIsHomeAttachmentMenuOpen(false);
+                              textareaRef.current?.focus();
+                            }}
+                          >
+                            <IconImage size={14} />
+                            <span>Create image</span>
+                          </button>
+
                           <button
                             type="button"
                             className="attachment-dropdown-item"
@@ -1578,6 +1695,35 @@ export const ChatScreen: React.FC = () => {
                 {t("engineTag")}
               </div>
 
+              {/* Empty-Home Quick Mode Chips (visible even if starter prompts are off) */}
+              <div className="home-quick-actions-row">
+                <button
+                  type="button"
+                  className={`home-quick-chip ${inputMode === "image" ? "active" : ""}`}
+                  onClick={() => {
+                    setInputMode(inputMode === "image" ? "chat" : "image");
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  <IconImage size={14} />
+                  <span>Create image</span>
+                </button>
+                <button
+                  type="button"
+                  className={`home-quick-chip ${isWebSearchActive ? "active" : ""}`}
+                  onClick={() => {
+                    if (isGuest) {
+                      setShowGuestLimitModal(true);
+                      return;
+                    }
+                    setIsWebSearchActive(!isWebSearchActive);
+                  }}
+                >
+                  <IconGlobe size={14} />
+                  <span>Web search</span>
+                </button>
+              </div>
+
               {/* Recent Artifacts & Starter Creations Section */}
               {preferences.showStarterPrompts !== false && (
                 <div className="home-artifacts-section">
@@ -1588,7 +1734,7 @@ export const ChatScreen: React.FC = () => {
                       className="artifacts-view-all"
                       onClick={() => {
                         setInputMode("image");
-                        setInputContent("A futuristic hyper-detailed cosmic portal in 8K");
+                        setInputContent("A futuristic cosmic portal glowing in deep violet and silver");
                       }}
                     >
                       {t("viewAll")}
@@ -1596,23 +1742,22 @@ export const ChatScreen: React.FC = () => {
                   </div>
 
                   <div className="artifacts-grid">
-                    {/* Artifact Card 1: Image Studio Preset */}
+                    {/* Artifact Card 1: Create Image Preset */}
                     <div
                       className="artifact-card"
                       onClick={() => {
                         setInputMode("image");
-                        setInputContent("Hyper-realistic futuristic neon car speeding on a cyberpunk highway at rain night");
+                        setInputContent("Photorealistic sleek sports car cruising a rain-slicked neon city boulevard at night");
                       }}
                     >
-                      <div className="artifact-card-preview">
-                        <img
-                          src="https://image.pollinations.ai/prompt/cyberpunk%20neon%20car%20night%20highway?width=300&height=180&nologo=true"
-                          alt="Cyberpunk"
-                          className="artifact-img-preview"
-                        />
+                      <div
+                        className="artifact-card-preview"
+                        style={{ background: "linear-gradient(135deg, #1b1035 0%, #3b1764 55%, #0e172a 100%)" }}
+                      >
+                        <IconImage size={28} style={{ color: "#e9d5ff", opacity: 0.92 }} />
                       </div>
-                      <div className="artifact-card-title">Cyberpunk Speed Machine</div>
-                      <div className="artifact-card-time">Image Studio • 1024×768 HD</div>
+                      <div className="artifact-card-title">Create Image Studio</div>
+                      <div className="artifact-card-time">Multiple styles &amp; ratios</div>
                     </div>
 
                     {/* Artifact Card 2: Video Studio Preset */}
@@ -1656,6 +1801,25 @@ export const ChatScreen: React.FC = () => {
                CONVERSATION VIEW (ACTIVE CHAT WITH MESSAGES & CREATIONS)
                ============================================================== */
             <div className="chat-scroll-wrapper">
+              {isDebugMode && !debugTraceDismissed && debugTraces.length > 0 && (
+                <div className="debug-storage-trace-strip">
+                  <span>
+                    Debug storage:{" "}
+                    {debugTraces
+                      .slice(-3)
+                      .map((tr) => `${tr.op}:${tr.path}`)
+                      .join(" · ")}
+                  </span>
+                  <button
+                    type="button"
+                    className="debug-trace-dismiss"
+                    onClick={() => setDebugTraceDismissed(true)}
+                    aria-label="Dismiss debug strip"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
               <div className="message-list">
                 {(() => {
                   const lastUserMsgId = [...activeChat.messages]
@@ -1728,11 +1892,34 @@ export const ChatScreen: React.FC = () => {
                             </div>
                           )}
 
-                          {/* 1. Assistant Image Studio Card if mediaType is image */}
+                          {/* 1. Assistant Image Card if mediaType is image */}
                           {!isUser && msg.mediaType === "image" && (
                             <ImageCreationCard
-                              prompt={msg.mediaPrompt || msg.content}
+                              chatId={activeChat.id}
+                              messageId={msg.id}
+                              prompt={msg.originalRequest || msg.mediaPrompt || msg.content}
+                              finalPrompt={msg.finalPrompt}
                               imageUrl={msg.mediaUrl}
+                              fullQualityUrl={getFullQualityImageUrl(msg.id)}
+                              style={msg.style}
+                              aspect={msg.aspect}
+                              width={msg.width}
+                              height={msg.height}
+                              seed={msg.seed}
+                              status={msg.status}
+                              errorMessage={msg.errorMessage}
+                              warnings={msg.warnings}
+                              addDownloadWatermark={!!preferences.addDownloadWatermark}
+                              isGuest={isGuest}
+                              onLazyLoadAsset={() => loadLazyImageForMessage(activeChat.id, msg.id)}
+                              onRegenerate={() => regenerateMessageImage(activeChat.id, msg.id)}
+                              onVariation={() => regenerateMessageImage(activeChat.id, msg.id, { variation: true })}
+                              onEditPrompt={(newPrompt) =>
+                                regenerateMessageImage(activeChat.id, msg.id, { editedPrompt: newPrompt })
+                              }
+                              onDeleteImage={() => deleteMessageImage(activeChat.id, msg.id)}
+                              onReportImage={() => reportMessageImage(activeChat.id, msg.id)}
+                              onRetryError={() => regenerateMessageImage(activeChat.id, msg.id)}
                             />
                           )}
 
@@ -1745,7 +1932,7 @@ export const ChatScreen: React.FC = () => {
                           )}
 
                           {/* 3. Text Content: Assistant or User (with inline Edit mode for last user msg) */}
-                          {!isUser && msg.content && (
+                          {!isUser && msg.content && msg.status !== "error" && (
                             <div className="message-text-content">
                               <MarkdownRenderer content={msg.content} />
                             </div>
@@ -1936,17 +2123,25 @@ export const ChatScreen: React.FC = () => {
                               )}
                             </>
                           )}
+
+                          {!isUser && isDebugMode && msg.routerMeta && (
+                            <div className="debug-router-pill">
+                              route: {msg.routerMeta.intent} ({Math.round(msg.routerMeta.confidence * 100)}%) ·{" "}
+                              {msg.routerMeta.reason}
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
                   });
                 })()}
 
-                {/* Sending / Generating indicator: ONLY show before text tokens start arriving */}
+                {/* Sending / Generating indicator: ONLY before text tokens start AND never duplicate image skeletons */}
                 {isSending &&
                   (!activeChat.messages.length ||
                     activeChat.messages[activeChat.messages.length - 1].role !== "assistant" ||
-                    !activeChat.messages[activeChat.messages.length - 1].content) && (
+                    (!activeChat.messages[activeChat.messages.length - 1].content &&
+                      activeChat.messages[activeChat.messages.length - 1].mediaType !== "image")) && (
                     <div className="message-row assistant-row">
                       <div className="assistant-avatar-wrap" aria-hidden="true">
                         <Logo variant="mark" size="xs" tile="circle" />
@@ -1963,8 +2158,9 @@ export const ChatScreen: React.FC = () => {
               </div>
             </div>
           )}
+          </main>
 
-          {/* Floating Scroll-to-Latest Button */}
+          {/* Floating Scroll-to-Latest Button (anchored cleanly inside .chat-scroll-stage above input bar) */}
           {showScrollToBottom && (
             <button
               type="button"
@@ -1976,11 +2172,12 @@ export const ChatScreen: React.FC = () => {
               <span>Scroll to latest</span>
             </button>
           )}
-        </main>
+        </div>
 
         {/* Bottom Input Zone (Visible when in active conversation) */}
         {activeChat && activeChat.messages.length > 0 && (
           <footer className="conversation-input-bar">
+            {renderDeleteErrorBanner()}
             {/* Calm Memory Saved Pill */}
             {lastExtractedMemory && (
               <div className="memory-saved-toast-pill" role="status">
@@ -2027,6 +2224,7 @@ export const ChatScreen: React.FC = () => {
               </div>
             )}
             <div className="chat-input-card">
+              {renderImageModeControls()}
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -2035,7 +2233,7 @@ export const ChatScreen: React.FC = () => {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   inputMode === "image"
-                    ? "Create an image with AUTONEXIS Image Studio..."
+                    ? "Describe the visual you want to create..."
                     : inputMode === "video"
                     ? "Render a cinematic scene with Video Studio..."
                     : preferences.enterToSend === false
@@ -2133,6 +2331,19 @@ export const ChatScreen: React.FC = () => {
 
                     {isAttachmentMenuOpen && (
                       <div className="attachment-dropdown-menu">
+                        <button
+                          type="button"
+                          className={`attachment-dropdown-item ${inputMode === "image" ? "active" : ""}`}
+                          onClick={() => {
+                            setInputMode(inputMode === "image" ? "chat" : "image");
+                            setIsAttachmentMenuOpen(false);
+                            textareaRef.current?.focus();
+                          }}
+                        >
+                          <IconImage size={14} />
+                          <span>Create image</span>
+                        </button>
+
                         <button
                           type="button"
                           className="attachment-dropdown-item"

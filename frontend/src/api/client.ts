@@ -96,6 +96,42 @@ export async function postChatMessage(
   }
 }
 
+export interface ImageRouterMeta {
+  intent: "image" | "image_edit" | "chat";
+  confidence: number;
+  reason: string;
+}
+
+export interface ImageGenerationResultPayload {
+  image_data_url: string;
+  original_request: string;
+  subject: string;
+  final_prompt: string;
+  style: string;
+  aspect: string;
+  width: number;
+  height: number;
+  seed: number;
+  model: string;
+  caption: string;
+  anonymous_mode: boolean;
+  warnings: string[];
+  router?: ImageRouterMeta;
+}
+
+export interface StreamChatOptions {
+  recentContext?: Array<Record<string, any>>;
+  forceImageMode?: boolean;
+  imageStyle?: string;
+  imageAspect?: string;
+  imageSeed?: number;
+  onRouterMeta?: (meta: ImageRouterMeta) => void;
+  onImageStatus?: (status: { stage: string; aspect?: string; style?: string; router?: ImageRouterMeta }) => void;
+  onImageResult?: (payload: ImageGenerationResultPayload) => void;
+  onImageBlocked?: (payload: { message: string; category?: string; moderation_log?: any; router?: ImageRouterMeta }) => void;
+  onImageError?: (payload: { message: string; rate_limited?: boolean; retry_after?: number; router?: ImageRouterMeta }) => void;
+}
+
 export async function streamChatMessage(
   messages: ChatMessagePayload[],
   userMemory: string | undefined,
@@ -108,7 +144,8 @@ export async function streamChatMessage(
   projectContext?: any,
   relevantPastChats?: any[],
   customStyle?: any,
-  voice = false
+  voice = false,
+  options?: StreamChatOptions
 ): Promise<void> {
   const url = `${API_BASE_URL}/chat/stream`;
   try {
@@ -125,8 +162,20 @@ export async function streamChatMessage(
         relevant_past_chats: relevantPastChats || undefined,
         custom_style: customStyle || undefined,
         voice: voice || undefined,
+        recent_context: options?.recentContext || undefined,
+        force_image_mode: options?.forceImageMode || undefined,
+        image_style: options?.imageStyle || undefined,
+        image_aspect: options?.imageAspect || undefined,
+        image_seed: options?.imageSeed ?? undefined,
       }),
     });
+
+    const routerHdr = res.headers.get("X-Autonexis-Router");
+    if (routerHdr && options?.onRouterMeta) {
+      try {
+        options.onRouterMeta(JSON.parse(routerHdr));
+      } catch {}
+    }
 
     if (res.status === 401) {
       await handleUnauthorized();
@@ -184,7 +233,26 @@ export async function streamChatMessage(
             }
             try {
               const parsed = JSON.parse(dataStr);
-              if (parsed.rate_limited) {
+              if (parsed.type === "router_meta" && parsed.router) {
+                options?.onRouterMeta?.(parsed.router);
+              } else if (parsed.type === "image_status") {
+                options?.onImageStatus?.(parsed);
+              } else if (parsed.type === "image_result") {
+                options?.onImageResult?.(parsed);
+              } else if (parsed.type === "image_blocked" || parsed.type === "image_guest_blocked") {
+                if (parsed.type === "image_blocked" && options?.onImageBlocked) {
+                  options.onImageBlocked(parsed);
+                } else if (typeof parsed.content === "string") {
+                  onChunk(parsed.content);
+                }
+              } else if (parsed.type === "image_error") {
+                if (options?.onImageError) {
+                  options.onImageError(parsed);
+                } else if (typeof parsed.message === "string") {
+                  onError(new Error(parsed.message));
+                  return;
+                }
+              } else if (parsed.rate_limited) {
                 onError(Object.assign(new Error(parsed.content || "Voice is busy, please try again shortly"), { rateLimited: true }));
                 return;
               } else if (parsed.error && parsed.content) {
@@ -375,5 +443,78 @@ export async function synthesizeEnglishSpeechApi(
     return { audioBlob: blob, fallbackBrowser: false };
   } catch {
     return { fallbackBrowser: true };
+  }
+}
+
+export async function generateImageApi(params: {
+  prompt: string;
+  style?: string;
+  aspect?: string;
+  seed?: number;
+  previousPrompt?: string;
+  isEdit?: boolean;
+  explicitMode?: boolean;
+  signal?: AbortSignal;
+}): Promise<{
+  ok: boolean;
+  data?: ImageGenerationResultPayload;
+  blocked?: boolean;
+  category?: string;
+  moderation_log?: any;
+  rate_limited?: boolean;
+  retry_after?: number;
+  error?: string;
+  router?: ImageRouterMeta;
+}> {
+  const url = `${API_BASE_URL}/image/generate?format=json`;
+  try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      return { ok: false, error: "Please log in to create images." };
+    }
+    const headers = await getAuthHeaders(false);
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      signal: params.signal,
+      body: JSON.stringify({
+        prompt: params.prompt,
+        style: params.style || undefined,
+        aspect: params.aspect || undefined,
+        seed: params.seed ?? undefined,
+        previous_prompt: params.previousPrompt || undefined,
+        is_edit: !!params.isEdit,
+        explicit_mode: !!params.explicitMode,
+      }),
+    });
+
+    if (res.status === 401) {
+      await handleUnauthorized();
+      return { ok: false, error: "Session expired. Please log in again." };
+    }
+
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload?.ok) {
+      return {
+        ok: false,
+        blocked: !!payload?.blocked,
+        category: payload?.category,
+        moderation_log: payload?.moderation_log,
+        rate_limited: !!payload?.rate_limited || res.status === 429 || res.status === 503,
+        retry_after: payload?.retry_after,
+        error: payload?.message || payload?.detail || "Could not create this image right now. Please try again.",
+        router: payload?.router,
+      };
+    }
+    return {
+      ok: true,
+      data: payload as ImageGenerationResultPayload,
+      router: payload.router,
+    };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      return { ok: false, error: "Cancelled" };
+    }
+    return { ok: false, error: "Network issue while creating image. Please try again." };
   }
 }

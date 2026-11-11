@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 import time
@@ -10,7 +11,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional, Union, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -20,8 +21,9 @@ from database import init_db, User, Chat, get_db
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from auth_utils import get_current_user, security
-from llm_client import llm_client
-from routers import auth, chat, voice
+from llm_client import llm_client, get_last_user_text, has_image_content
+from image_router import detect_image_intent
+from routers import auth, chat, voice, image
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,10 +47,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include Authentication, Chat & Voice Call Routers
+# Include Authentication, Chat, Voice Call & Image Generation Routers
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(voice.router)
+app.include_router(image.router)
 
 class MessageItem(BaseModel):
     role: str = Field(..., description="Role of the sender (user, assistant)")
@@ -63,6 +66,11 @@ class DirectChatRequest(BaseModel):
     relevant_past_chats: Optional[List[Dict[str, Any]]] = None
     custom_style: Optional[Dict[str, Any]] = None
     voice: bool = False
+    recent_context: Optional[List[Dict[str, Any]]] = None
+    force_image_mode: bool = False
+    image_style: Optional[str] = None
+    image_aspect: Optional[str] = None
+    image_seed: Optional[int] = None
 
 class StyleCreateRequest(BaseModel):
     sample: str = Field(..., min_length=10, max_length=2000)
@@ -170,6 +178,17 @@ async def chat_direct(
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
     
     messages_payload = [m.model_dump() for m in req.messages]
+    last_text = get_last_user_text(messages_payload)
+    last_has_upload = has_image_content(messages_payload[-1:]) if messages_payload else False
+    if req.voice:
+        router_result = {"intent": "chat", "confidence": 1.0, "reason": "voice_mode"}
+    elif req.force_image_mode:
+        router_result = {"intent": "image", "confidence": 1.0, "subject": last_text, "style": req.image_style, "aspect": req.image_aspect, "reason": "explicit_mode"}
+    else:
+        router_result = await detect_image_intent(last_text, recent_context=req.recent_context, has_uploaded_image=last_has_upload)
+    safe_router = {"intent": router_result.get("intent", "chat"), "confidence": router_result.get("confidence", 0.95), "reason": router_result.get("reason", "rule")}
+    uid_str = "guest" if is_guest else str(current_user.id)
+
     result = await llm_client.chat_non_stream(
         messages_payload,
         req.user_memory,
@@ -179,8 +198,10 @@ async def chat_direct(
         custom_style=req.custom_style if not is_guest else None,
         is_guest=is_guest,
         voice=bool(req.voice),
+        uid=uid_str,
+        router_result=router_result,
     )
-    return result
+    return JSONResponse(content=result, headers={"X-Autonexis-Router": json.dumps(safe_router)})
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
@@ -229,6 +250,17 @@ async def chat_stream_endpoint(
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
 
     messages_payload = [m.model_dump() for m in req.messages]
+    last_text = get_last_user_text(messages_payload)
+    last_has_upload = has_image_content(messages_payload[-1:]) if messages_payload else False
+    if req.voice:
+        router_result = {"intent": "chat", "confidence": 1.0, "reason": "voice_mode"}
+    elif req.force_image_mode:
+        router_result = {"intent": "image", "confidence": 1.0, "subject": last_text, "style": req.image_style, "aspect": req.image_aspect, "reason": "explicit_mode"}
+    else:
+        router_result = await detect_image_intent(last_text, recent_context=req.recent_context, has_uploaded_image=last_has_upload)
+    safe_router = {"intent": router_result.get("intent", "chat"), "confidence": router_result.get("confidence", 0.95), "reason": router_result.get("reason", "rule")}
+    uid_str = "guest" if is_guest else str(current_user.id)
+
     return StreamingResponse(
         llm_client.chat_stream(
             messages_payload,
@@ -239,12 +271,18 @@ async def chat_stream_endpoint(
             custom_style=req.custom_style if not is_guest else None,
             is_guest=is_guest,
             voice=bool(req.voice),
+            uid=uid_str,
+            router_result=router_result,
+            image_style=req.image_style,
+            image_aspect=req.image_aspect,
+            image_seed=req.image_seed,
         ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
+            "X-Accel-Buffering": "no",
+            "X-Autonexis-Router": json.dumps(safe_router),
         }
     )
 

@@ -18,8 +18,11 @@ import {
   collection,
   doc,
   getDocs,
+  getDocsFromServer,
   getDoc,
+  getDocFromServer,
   setDoc,
+  updateDoc,
   deleteDoc,
   writeBatch,
   query,
@@ -33,6 +36,61 @@ import {
   type QueryDocumentSnapshot,
   type Firestore,
 } from "firebase/firestore";
+
+// ---------------------------------------------------------------------------
+// Delete Tombstones & ?debug=1 Storage/Retention Trace (paths only, zero content)
+// ---------------------------------------------------------------------------
+
+const _DELETING_CHATS = new Set<string>();
+const _DELETED_CHAT_TOMBSTONES = new Set<string>();
+const _STORAGE_DEBUG_TRACE: Array<{ ts: string; op: string; path: string }> = [];
+
+function chatKey(uid: string, chatId: string): string {
+  return `${uid}:${chatId}`;
+}
+
+export function markChatDeleting(uid: string, chatId: string): void {
+  const k = chatKey(uid, chatId);
+  _DELETING_CHATS.add(k);
+  _DELETED_CHAT_TOMBSTONES.add(k);
+}
+
+export function clearChatDeletingFlag(uid: string, chatId: string, deletedSucceeded: boolean): void {
+  const k = chatKey(uid, chatId);
+  _DELETING_CHATS.delete(k);
+  if (!deletedSucceeded) {
+    _DELETED_CHAT_TOMBSTONES.delete(k);
+  }
+}
+
+export function isChatDeletingOrDeleted(uid: string, chatId: string): boolean {
+  const k = chatKey(uid, chatId);
+  return _DELETING_CHATS.has(k) || _DELETED_CHAT_TOMBSTONES.has(k);
+}
+
+export function clearAllDeleteTombstones(): void {
+  _DELETING_CHATS.clear();
+  _DELETED_CHAT_TOMBSTONES.clear();
+}
+
+export function recordStorageDebugTrace(op: string, path: string): void {
+  const entry = {
+    ts: new Date().toISOString().slice(11, 23),
+    op,
+    path,
+  };
+  _STORAGE_DEBUG_TRACE.push(entry);
+  if (_STORAGE_DEBUG_TRACE.length > 60) {
+    _STORAGE_DEBUG_TRACE.splice(0, _STORAGE_DEBUG_TRACE.length - 60);
+  }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("autonexis:storage-trace", { detail: entry }));
+  }
+}
+
+export function getStorageDebugTraces(): Array<{ ts: string; op: string; path: string }> {
+  return [..._STORAGE_DEBUG_TRACE];
+}
 
 // ---------------------------------------------------------------------------
 // Singleton Firestore instance with in-memory cache only
@@ -77,6 +135,15 @@ export interface FirestoreMessage {
   content: string;
   createdAt: string;
   mediaType?: "text" | "image" | "video" | "voice";
+  originalRequest?: string;
+  finalPrompt?: string;
+  style?: string;
+  aspect?: string;
+  width?: number;
+  height?: number;
+  seed?: number;
+  model?: string;
+  status?: "generating" | "ready" | "expired" | "deleted" | "error" | "blocked";
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +226,15 @@ export async function loadChatMessages(
       content: data.content || "",
       createdAt: tsToISO(data.createdAt),
       mediaType: data.mediaType || undefined,
+      originalRequest: data.originalRequest || undefined,
+      finalPrompt: data.finalPrompt || undefined,
+      style: data.style || undefined,
+      aspect: data.aspect || undefined,
+      width: typeof data.width === "number" ? data.width : undefined,
+      height: typeof data.height === "number" ? data.height : undefined,
+      seed: typeof data.seed === "number" ? data.seed : undefined,
+      model: data.model || undefined,
+      status: data.status || undefined,
     });
   });
   return messages;
@@ -170,7 +246,8 @@ export async function loadChatMessages(
 
 /**
  * Save or update a chat document and its new messages in a single batch.
- * `newMessages` should only contain messages not yet saved (user + assistant).
+ * Never writes if chat is marked deleting/deleted, and uses update() when
+ * updating an existing chat so a late save can never resurrect a deleted chat.
  */
 export async function saveChatWithMessages(
   uid: string,
@@ -181,27 +258,63 @@ export async function saveChatWithMessages(
     role: "user" | "assistant";
     content: string;
     mediaType?: "text" | "image" | "video" | "voice";
+    originalRequest?: string;
+    finalPrompt?: string;
+    style?: string;
+    aspect?: string;
+    width?: number;
+    height?: number;
+    seed?: number;
+    model?: string;
+    status?: "generating" | "ready" | "expired" | "deleted" | "error" | "blocked";
   }>,
-  extraMeta?: { projectId?: string | null; pinned?: boolean; archived?: boolean }
+  extraMeta?: { projectId?: string | null; pinned?: boolean; archived?: boolean; isExistingChat?: boolean }
 ): Promise<void> {
-  const batch = writeBatch(db());
-  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
-
-  const metaUpdate: Record<string, any> = {
-    title,
-    updatedAt: serverTimestamp(),
-    createdAt: serverTimestamp(), // only takes effect on first create due to merge
-  };
-  if (extraMeta) {
-    if (extraMeta.projectId !== undefined) metaUpdate.projectId = extraMeta.projectId;
-    if (extraMeta.pinned !== undefined) metaUpdate.pinned = extraMeta.pinned;
-    if (extraMeta.archived !== undefined) metaUpdate.archived = extraMeta.archived;
+  if (isChatDeletingOrDeleted(uid, chatId)) {
+    recordStorageDebugTrace("skip_save_deleted", `users/${uid}/chats/${chatId}`);
+    return;
   }
 
-  // Upsert chat metadata
-  batch.set(chatDocRef, metaUpdate, { merge: true });
+  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
+  const isExisting = !!extraMeta?.isExistingChat;
 
-  // Add messages
+  if (isExisting) {
+    // Verify server existence so deleted chats cannot be silently recreated by late saves
+    const serverChat = await getDocFromServer(chatDocRef).catch(() => null);
+    if (!serverChat || !serverChat.exists() || isChatDeletingOrDeleted(uid, chatId)) {
+      recordStorageDebugTrace("skip_late_save_missing_chat", `users/${uid}/chats/${chatId}`);
+      return;
+    }
+  }
+
+  const batch = writeBatch(db());
+
+  if (isExisting) {
+    const updateMeta: Record<string, any> = {
+      updatedAt: serverTimestamp(),
+    };
+    if (title) updateMeta.title = title;
+    if (extraMeta) {
+      if (extraMeta.projectId !== undefined) updateMeta.projectId = extraMeta.projectId;
+      if (extraMeta.pinned !== undefined) updateMeta.pinned = extraMeta.pinned;
+      if (extraMeta.archived !== undefined) updateMeta.archived = extraMeta.archived;
+    }
+    batch.update(chatDocRef, updateMeta);
+  } else {
+    const metaUpdate: Record<string, any> = {
+      title,
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    };
+    if (extraMeta) {
+      if (extraMeta.projectId !== undefined) metaUpdate.projectId = extraMeta.projectId;
+      if (extraMeta.pinned !== undefined) metaUpdate.pinned = extraMeta.pinned;
+      if (extraMeta.archived !== undefined) metaUpdate.archived = extraMeta.archived;
+    }
+    batch.set(chatDocRef, metaUpdate, { merge: true });
+  }
+
+  // Add messages (never store image base64 directly in message docs)
   for (const msg of newMessages) {
     const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msg.id);
     const msgDoc: Record<string, any> = {
@@ -209,33 +322,46 @@ export async function saveChatWithMessages(
       content: sanitizeContentForStorage(msg.content),
       createdAt: serverTimestamp(),
     };
-    if (msg.mediaType) {
-      msgDoc.mediaType = msg.mediaType;
-    }
+    if (msg.mediaType) msgDoc.mediaType = msg.mediaType;
+    if (msg.originalRequest) msgDoc.originalRequest = msg.originalRequest.slice(0, 1200);
+    if (msg.finalPrompt) msgDoc.finalPrompt = msg.finalPrompt.slice(0, 1200);
+    if (msg.style) msgDoc.style = msg.style.slice(0, 48);
+    if (msg.aspect) msgDoc.aspect = msg.aspect.slice(0, 16);
+    if (typeof msg.width === "number") msgDoc.width = msg.width;
+    if (typeof msg.height === "number") msgDoc.height = msg.height;
+    if (typeof msg.seed === "number") msgDoc.seed = msg.seed;
+    if (msg.model) msgDoc.model = msg.model.slice(0, 32);
+    if (msg.status) msgDoc.status = msg.status;
     batch.set(msgRef, msgDoc);
+  }
+
+  if (isChatDeletingOrDeleted(uid, chatId)) {
+    recordStorageDebugTrace("abort_commit_deleting", `users/${uid}/chats/${chatId}`);
+    return;
   }
 
   await batch.commit();
 }
 
 /**
- * Update pin, archive, or project assignment flags on a chat document.
+ * Update pin, archive, or project assignment flags on an existing chat document.
  */
 export async function updateChatFlags(
   uid: string,
   chatId: string,
   flags: { pinned?: boolean; archived?: boolean; projectId?: string | null }
 ): Promise<void> {
+  if (isChatDeletingOrDeleted(uid, chatId)) return;
   const chatDocRef = doc(db(), "users", uid, "chats", chatId);
   const payload: Record<string, any> = { updatedAt: serverTimestamp() };
   if (flags.pinned !== undefined) payload.pinned = flags.pinned;
   if (flags.archived !== undefined) payload.archived = flags.archived;
   if (flags.projectId !== undefined) payload.projectId = flags.projectId;
-  await setDoc(chatDocRef, payload, { merge: true });
+  await updateDoc(chatDocRef, payload);
 }
 
 /**
- * Edit the user's message and delete any messages that came after it (e.g. old assistant reply).
+ * Edit the user's message and delete any messages (plus any image assets) after it.
  */
 export async function replaceMessageAndDeleteAfter(
   uid: string,
@@ -244,88 +370,404 @@ export async function replaceMessageAndDeleteAfter(
   newContent: string,
   deleteMsgIds: string[]
 ): Promise<void> {
-  const batch = writeBatch(db());
+  if (isChatDeletingOrDeleted(uid, chatId)) return;
   const chatDocRef = doc(db(), "users", uid, "chats", chatId);
   const editedRef = doc(db(), "users", uid, "chats", chatId, "messages", editedMsgId);
 
-  batch.set(
-    editedRef,
-    { content: sanitizeContentForStorage(newContent) },
-    { merge: true }
-  );
+  for (const delId of deleteMsgIds) {
+    await deleteMessageAssetsForMessage(uid, chatId, delId).catch(() => {});
+  }
+
+  const batch = writeBatch(db());
+  batch.update(editedRef, { content: sanitizeContentForStorage(newContent) });
 
   for (const delId of deleteMsgIds) {
     const delRef = doc(db(), "users", uid, "chats", chatId, "messages", delId);
     batch.delete(delRef);
   }
 
-  batch.set(chatDocRef, { updatedAt: serverTimestamp() }, { merge: true });
+  batch.update(chatDocRef, { updatedAt: serverTimestamp() });
   await batch.commit();
 }
 
 /**
- * Update only the chat title.
+ * Update only the chat title (updateDoc prevents resurrecting deleted chats).
  */
 export async function updateChatTitle(
   uid: string,
   chatId: string,
   title: string
 ): Promise<void> {
+  if (isChatDeletingOrDeleted(uid, chatId)) return;
   const chatDocRef = doc(db(), "users", uid, "chats", chatId);
-  await setDoc(chatDocRef, { title, updatedAt: serverTimestamp() }, { merge: true });
+  await updateDoc(chatDocRef, { title, updatedAt: serverTimestamp() });
 }
 
 /**
- * Update only the updatedAt timestamp (e.g., after partial reply save).
+ * Update only the updatedAt timestamp on an existing chat.
  */
 export async function touchChat(uid: string, chatId: string): Promise<void> {
+  if (isChatDeletingOrDeleted(uid, chatId)) return;
   const chatDocRef = doc(db(), "users", uid, "chats", chatId);
-  await setDoc(chatDocRef, { updatedAt: serverTimestamp() }, { merge: true });
+  await updateDoc(chatDocRef, { updatedAt: serverTimestamp() });
 }
 
 // ---------------------------------------------------------------------------
-// Delete operations
+// Image Asset Storage & Retention (Latest 20 stored images per user)
 // ---------------------------------------------------------------------------
 
-/**
- * Delete a single chat and ALL its messages.
- * Firestore doesn't auto-delete subcollections, so we batch-delete messages first.
- */
-export async function deleteOneChat(uid: string, chatId: string): Promise<void> {
-  // Step 1: delete all messages in batches of 400 (Firestore max is 500)
-  const msgsRef = collection(db(), "users", uid, "chats", chatId, "messages");
-  let keepGoing = true;
-  while (keepGoing) {
-    const snap = await getDocs(query(msgsRef, limit(400)));
-    if (snap.empty) {
-      keepGoing = false;
-      break;
-    }
+export const MAX_STORED_IMAGES_PER_USER = 20;
+
+async function deleteMessageAssetsForMessage(uid: string, chatId: string, msgId: string): Promise<number> {
+  let removed = 0;
+  const assetsCol = collection(db(), "users", uid, "chats", chatId, "messages", msgId, "assets");
+  const snap = await getDocsFromServer(query(assetsCol, limit(50))).catch(() => getDocs(query(assetsCol, limit(50))));
+  if (!snap.empty) {
     const batch = writeBatch(db());
-    snap.forEach((d) => batch.delete(d.ref));
+    snap.forEach((d) => {
+      batch.delete(d.ref);
+      removed++;
+      recordStorageDebugTrace("delete_asset", d.ref.path);
+    });
     await batch.commit();
   }
-
-  // Step 2: delete the chat doc itself
-  await deleteDoc(doc(db(), "users", uid, "chats", chatId));
+  const indexRef = doc(db(), "users", uid, "imageAssets", msgId);
+  await deleteDoc(indexRef).catch(() => {});
+  return removed;
 }
 
 /**
- * Delete ALL chats and their messages for a user.
+ * Save compressed JPEG base64 (~<=150 KB) into dedicated asset subcollection
+ * users/{uid}/chats/{chatId}/messages/{msgId}/assets/main and enforce 20-image retention.
+ */
+export async function saveMessageImageAsset(
+  uid: string,
+  chatId: string,
+  msgId: string,
+  asset: { dataUrl: string; width: number; height: number; sizeBytes: number }
+): Promise<{ evictedCount: number }> {
+  if (isChatDeletingOrDeleted(uid, chatId)) {
+    recordStorageDebugTrace("skip_asset_save_deleting", `users/${uid}/chats/${chatId}/messages/${msgId}/assets/main`);
+    return { evictedCount: 0 };
+  }
+
+  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
+  const serverChat = await getDocFromServer(chatDocRef).catch(() => null);
+  if (!serverChat || !serverChat.exists() || isChatDeletingOrDeleted(uid, chatId)) {
+    recordStorageDebugTrace("skip_asset_missing_chat", `users/${uid}/chats/${chatId}/messages/${msgId}/assets/main`);
+    return { evictedCount: 0 };
+  }
+
+  const assetRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId, "assets", "main");
+  await setDoc(assetRef, {
+    dataUrl: asset.dataUrl,
+    mime: "image/jpeg",
+    width: asset.width,
+    height: asset.height,
+    sizeBytes: asset.sizeBytes,
+    chatId,
+    messageId: msgId,
+    createdAt: serverTimestamp(),
+  });
+  recordStorageDebugTrace("save_asset", assetRef.path);
+
+  const indexRef = doc(db(), "users", uid, "imageAssets", msgId);
+  await setDoc(indexRef, {
+    chatId,
+    messageId: msgId,
+    assetPath: assetRef.path,
+    sizeBytes: asset.sizeBytes,
+    createdAt: serverTimestamp(),
+  });
+
+  const evictedCount = await enforceImageRetention(uid, MAX_STORED_IMAGES_PER_USER);
+  return { evictedCount };
+}
+
+/**
+ * Load compressed JPEG Data URL lazily from users/{uid}/chats/{chatId}/messages/{msgId}/assets/main.
+ */
+export async function loadMessageImageAsset(
+  uid: string,
+  chatId: string,
+  msgId: string
+): Promise<string | null> {
+  try {
+    const assetRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId, "assets", "main");
+    const snap = await getDoc(assetRef);
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    return typeof data.dataUrl === "string" && data.dataUrl.startsWith("data:image/") ? data.dataUrl : null;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Lazy image asset read error:", err);
+    return null;
+  }
+}
+
+/**
+ * Deletes ONLY the stored image asset for one message (leaving parameters & Regenerate button).
+ */
+export async function deleteMessageImageAsset(
+  uid: string,
+  chatId: string,
+  msgId: string
+): Promise<void> {
+  if (isChatDeletingOrDeleted(uid, chatId)) return;
+  await deleteMessageAssetsForMessage(uid, chatId, msgId);
+  const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId);
+  await updateDoc(msgRef, { status: "deleted" }).catch(() => {});
+  recordStorageDebugTrace("mark_image_deleted", msgRef.path);
+}
+
+/**
+ * Keep at most `keepLimit` newest stored images per user.
+ * Deletes ONLY oldest assets beyond the limit; preserves message text & parameters.
+ */
+export async function enforceImageRetention(uid: string, keepLimit = MAX_STORED_IMAGES_PER_USER): Promise<number> {
+  try {
+    const idxCol = collection(db(), "users", uid, "imageAssets");
+    const snap = await getDocsFromServer(query(idxCol, orderBy("createdAt", "desc"), limit(200))).catch(() =>
+      getDocs(query(idxCol, orderBy("createdAt", "desc"), limit(200)))
+    );
+    if (snap.size <= keepLimit) return 0;
+
+    const toEvict = snap.docs.slice(keepLimit);
+    let evicted = 0;
+    for (const d of toEvict) {
+      const data = d.data();
+      const chatId = String(data.chatId || "");
+      const msgId = String(data.messageId || d.id);
+      if (!chatId || !msgId || isChatDeletingOrDeleted(uid, chatId)) continue;
+
+      const assetRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId, "assets", "main");
+      await deleteDoc(assetRef).catch(() => {});
+      recordStorageDebugTrace("retention_evict_asset", assetRef.path);
+
+      const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId);
+      await updateDoc(msgRef, { status: "expired" }).catch(() => {});
+      await deleteDoc(d.ref).catch(() => {});
+      evicted++;
+    }
+    return evicted;
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Image retention pass skipped:", err);
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Robust Delete operations (Single chat, Delete all chats, Orphan cleanup)
+// ---------------------------------------------------------------------------
+
+/**
+ * Robustly delete one chat and ALL its subcollections:
+ *   1) All image asset docs inside messages/{id}/assets/* and imageAssets index docs
+ *   2) All messages in batches of <= 400 in a loop until empty
+ *   3) Feedback docs linked to chatId in batches of <= 400
+ *   4) Chat doc users/{uid}/chats/{chatId}
+ *   5) Verify from SERVER (getDocFromServer / getDocsFromServer) that nothing remains
+ */
+export async function deleteChat(uid: string, chatId: string): Promise<void> {
+  markChatDeleting(uid, chatId);
+  const chatDocRef = doc(db(), "users", uid, "chats", chatId);
+  const msgsRef = collection(db(), "users", uid, "chats", chatId, "messages");
+
+  try {
+    // 1 & 2. Loop through all messages and delete their assets + message docs in <=400 op batches
+    let keepGoing = true;
+    while (keepGoing) {
+      const snap = await getDocsFromServer(query(msgsRef, limit(400)));
+      if (snap.empty) {
+        keepGoing = false;
+        break;
+      }
+
+      // First delete any image asset docs & index entries for this slice of messages
+      const deleteRefs: any[] = [];
+      for (const msgDoc of snap.docs) {
+        const assetsCol = collection(db(), "users", uid, "chats", chatId, "messages", msgDoc.id, "assets");
+        const assetSnap = await getDocsFromServer(query(assetsCol, limit(50))).catch(() =>
+          getDocs(query(assetsCol, limit(50)))
+        );
+        assetSnap.forEach((a) => {
+          deleteRefs.push(a.ref);
+          recordStorageDebugTrace("delete_asset", a.ref.path);
+        });
+        deleteRefs.push(doc(db(), "users", uid, "imageAssets", msgDoc.id));
+        deleteRefs.push(msgDoc.ref);
+        recordStorageDebugTrace("delete_message", msgDoc.ref.path);
+      }
+
+      // Commit deletions strictly in chunks <= 400
+      for (let i = 0; i < deleteRefs.length; i += 400) {
+        const batch = writeBatch(db());
+        const chunk = deleteRefs.slice(i, i + 400);
+        chunk.forEach((r) => batch.delete(r));
+        await batch.commit();
+      }
+    }
+
+    // 3. Delete any feedback records tied to this chatId
+    try {
+      const fbCol = collection(db(), "users", uid, "feedback");
+      const fbSnap = await getDocsFromServer(query(fbCol, where("chatId", "==", chatId), limit(400)));
+      if (!fbSnap.empty) {
+        const fbBatch = writeBatch(db());
+        fbSnap.forEach((f) => {
+          fbBatch.delete(f.ref);
+          recordStorageDebugTrace("delete_feedback", f.ref.path);
+        });
+        await fbBatch.commit();
+      }
+    } catch {
+      // Non-fatal feedback cleanup error
+    }
+
+    // 4. Delete the chat document itself
+    await deleteDoc(chatDocRef);
+    recordStorageDebugTrace("delete_chat", chatDocRef.path);
+
+    // 5. Verify directly from SERVER (never cache) that nothing remains
+    const verifyChat = await getDocFromServer(chatDocRef);
+    if (verifyChat.exists()) {
+      throw new Error(`Chat ${chatId} still exists on server after deletion.`);
+    }
+    const verifyMsgs = await getDocsFromServer(query(msgsRef, limit(1)));
+    if (!verifyMsgs.empty) {
+      throw new Error(`Leftover messages found on server for chat ${chatId}.`);
+    }
+
+    clearChatDeletingFlag(uid, chatId, true);
+  } catch (err) {
+    clearChatDeletingFlag(uid, chatId, false);
+    throw err;
+  }
+}
+
+/** Backwards-compatible export alias */
+export const deleteOneChat = deleteChat;
+
+/**
+ * Delete ALL chats and their nested messages/image assets using deleteChat.
  */
 export async function deleteAllChats(uid: string): Promise<void> {
   const chatsRef = collection(db(), "users", uid, "chats");
   let keepGoing = true;
   while (keepGoing) {
-    const snap = await getDocs(query(chatsRef, limit(50)));
+    const snap = await getDocsFromServer(query(chatsRef, limit(50)));
     if (snap.empty) {
       keepGoing = false;
       break;
     }
     for (const chatDoc of snap.docs) {
-      await deleteOneChat(uid, chatDoc.id);
+      await deleteChat(uid, chatDoc.id);
     }
   }
+}
+
+/**
+ * Settings "Clean up storage": finds and removes orphaned image assets,
+ * leftover messages in deleted chats, and dangling index/feedback items
+ * strictly under the signed-in user's namespace.
+ */
+export async function cleanupOrphanedStorage(uid: string): Promise<{ removedCount: number; paths: string[] }> {
+  let removedCount = 0;
+  const removedPaths: string[] = [];
+  const chatExistsCache = new Map<string, boolean>();
+
+  const checkChatExistsOnServer = async (chatId: string): Promise<boolean> => {
+    if (chatExistsCache.has(chatId)) return chatExistsCache.get(chatId)!;
+    const snap = await getDocFromServer(doc(db(), "users", uid, "chats", chatId));
+    const exists = snap.exists();
+    chatExistsCache.set(chatId, exists);
+    return exists;
+  };
+
+  // 1. Inspect users/{uid}/imageAssets for orphans
+  const idxCol = collection(db(), "users", uid, "imageAssets");
+  const idxSnap = await getDocsFromServer(query(idxCol, limit(500)));
+  for (const idxDoc of idxSnap.docs) {
+    const data = idxDoc.data();
+    const chatId = String(data.chatId || "");
+    const msgId = String(data.messageId || idxDoc.id);
+    if (!chatId || !msgId) {
+      await deleteDoc(idxDoc.ref);
+      removedCount++;
+      removedPaths.push(idxDoc.ref.path);
+      continue;
+    }
+
+    const parentChatOk = await checkChatExistsOnServer(chatId);
+    if (!parentChatOk) {
+      // Delete orphaned assets + messages inside deleted chatId folder
+      const deletedAssets = await deleteMessageAssetsForMessage(uid, chatId, msgId);
+      removedCount += deletedAssets;
+      const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId);
+      const msgSnap = await getDocFromServer(msgRef).catch(() => null);
+      if (msgSnap?.exists()) {
+        await deleteDoc(msgRef);
+        removedCount++;
+        removedPaths.push(msgRef.path);
+        recordStorageDebugTrace("cleanup_orphan_msg", msgRef.path);
+      }
+      await deleteDoc(idxDoc.ref).catch(() => {});
+      removedCount++;
+      removedPaths.push(idxDoc.ref.path);
+      recordStorageDebugTrace("cleanup_orphan_index", idxDoc.ref.path);
+    } else {
+      const msgRef = doc(db(), "users", uid, "chats", chatId, "messages", msgId);
+      const msgSnap = await getDocFromServer(msgRef).catch(() => null);
+      if (!msgSnap?.exists()) {
+        const deletedAssets = await deleteMessageAssetsForMessage(uid, chatId, msgId);
+        removedCount += deletedAssets + 1;
+        removedPaths.push(idxDoc.ref.path);
+        recordStorageDebugTrace("cleanup_orphan_asset_no_msg", idxDoc.ref.path);
+      }
+    }
+  }
+
+  // 2. Inspect feedback docs whose chat no longer exists on server
+  const fbCol = collection(db(), "users", uid, "feedback");
+  const fbSnap = await getDocsFromServer(query(fbCol, limit(400)));
+  const orphanFbRefs: any[] = [];
+  for (const fbDoc of fbSnap.docs) {
+    const cId = String(fbDoc.data().chatId || "");
+    if (!cId) continue;
+    if (!(await checkChatExistsOnServer(cId))) {
+      orphanFbRefs.push(fbDoc.ref);
+    }
+  }
+  for (let i = 0; i < orphanFbRefs.length; i += 400) {
+    const batch = writeBatch(db());
+    orphanFbRefs.slice(i, i + 400).forEach((r) => {
+      batch.delete(r);
+      removedCount++;
+      removedPaths.push(r.path);
+      recordStorageDebugTrace("cleanup_orphan_feedback", r.path);
+    });
+    await batch.commit();
+  }
+
+  return { removedCount, paths: removedPaths };
+}
+
+// ---------------------------------------------------------------------------
+// Image Moderation Log Store (users/{uid}/moderation)
+// ---------------------------------------------------------------------------
+
+export async function saveModerationLog(
+  uid: string,
+  entry: { category: string; cooldownTriggered?: boolean }
+): Promise<void> {
+  const modId = "mod_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+  const modRef = doc(db(), "users", uid, "moderation", modId);
+  await setDoc(modRef, {
+    uid,
+    category: entry.category.slice(0, 64),
+    cooldownTriggered: !!entry.cooldownTriggered,
+    createdAt: serverTimestamp(),
+  });
+  recordStorageDebugTrace("save_moderation", modRef.path);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +829,7 @@ export interface UserPreferences {
   breakReminderMinutes?: 60 | 90 | 120;
   customStyles?: CustomStyleItem[];
   activeCustomStyleId?: string | null;
+  addDownloadWatermark?: boolean;
   updatedAt?: string;
 }
 
@@ -421,6 +864,7 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   breakReminderMinutes: 60,
   customStyles: [],
   activeCustomStyleId: null,
+  addDownloadWatermark: false,
 };
 
 export async function loadUserPreferences(uid: string): Promise<UserPreferences | null> {
@@ -474,6 +918,7 @@ export async function loadUserPreferences(uid: string): Promise<UserPreferences 
           : 60,
       customStyles: Array.isArray(data.customStyles) ? data.customStyles.slice(0, 3) : [],
       activeCustomStyleId: data.activeCustomStyleId ?? null,
+      addDownloadWatermark: data.addDownloadWatermark ?? false,
       updatedAt: tsToISO(data.updatedAt),
     };
   } catch (err) {
@@ -796,11 +1241,12 @@ export async function deleteProjectAndUnlinkChats(
   if (linkedIds.size > 0) {
     const batch = writeBatch(db());
     linkedIds.forEach((cid) => {
-      batch.set(
-        doc(db(), "users", uid, "chats", cid),
-        { projectId: null, updatedAt: serverTimestamp() },
-        { merge: true }
-      );
+      if (!isChatDeletingOrDeleted(uid, cid)) {
+        batch.update(doc(db(), "users", uid, "chats", cid), {
+          projectId: null,
+          updatedAt: serverTimestamp(),
+        });
+      }
     });
     await batch.commit();
   }
@@ -909,6 +1355,40 @@ export async function saveProblemReport(
     message: report.message.trim().slice(0, 2000),
     appVersion: report.appVersion.slice(0, 40),
     browser: report.browser.slice(0, 250),
+    createdAt: serverTimestamp(),
+  });
+  return reportId;
+}
+
+export async function saveImageReport(
+  uid: string,
+  report: {
+    chatId: string;
+    messageId: string;
+    originalRequest?: string;
+    finalPrompt?: string;
+    style?: string;
+    aspect?: string;
+    width?: number;
+    height?: number;
+    seed?: number;
+    reason?: string;
+  }
+): Promise<string> {
+  const reportId = "imgrep_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+  const reportRef = doc(db(), "users", uid, "reports", reportId);
+  await setDoc(reportRef, {
+    category: "Generated Image Report",
+    chatId: report.chatId.slice(0, 120),
+    messageId: report.messageId.slice(0, 120),
+    originalRequest: (report.originalRequest || "").slice(0, 1000),
+    finalPrompt: (report.finalPrompt || "").slice(0, 1000),
+    style: (report.style || "").slice(0, 48),
+    aspect: (report.aspect || "").slice(0, 16),
+    width: typeof report.width === "number" ? report.width : null,
+    height: typeof report.height === "number" ? report.height : null,
+    seed: typeof report.seed === "number" ? report.seed : null,
+    reason: (report.reason || "User reported generated image").slice(0, 400),
     createdAt: serverTimestamp(),
   });
   return reportId;

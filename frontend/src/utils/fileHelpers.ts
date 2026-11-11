@@ -262,3 +262,64 @@ export async function extractPdfText(
   };
 }
 
+/**
+ * Compresses an image Data URL (or URL loaded in browser) to a JPEG Data URL
+ * bounded by maxLongSide (default 1024px) and maxBytes (default 150 KB binary JPEG)
+ * so storing it in its own Firestore asset document stays far below Firestore's 1 MB limit.
+ */
+export async function compressImageDataUrlToJpeg(
+  srcUrl: string,
+  options?: { maxLongSide?: number; maxBytes?: number }
+): Promise<{ dataUrl: string; width: number; height: number; sizeBytes: number }> {
+  const maxLongSide = options?.maxLongSide ?? 1024;
+  const maxBytes = options?.maxBytes ?? 150 * 1024;
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.crossOrigin = "anonymous";
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("Failed to load image for compression"));
+    el.src = srcUrl;
+  });
+
+  const natW = img.naturalWidth || 1024;
+  const natH = img.naturalHeight || 1024;
+
+  const tryEncode = (targetMaxSide: number, quality: number) => {
+    let w = natW;
+    let h = natH;
+    if (w > targetMaxSide || h > targetMaxSide) {
+      if (w >= h) {
+        h = Math.max(64, Math.round((h * targetMaxSide) / w));
+        w = targetMaxSide;
+      } else {
+        w = Math.max(64, Math.round((w * targetMaxSide) / h));
+        h = targetMaxSide;
+      }
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas context unavailable");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    const commaIdx = dataUrl.indexOf(",");
+    const b64Len = commaIdx >= 0 ? dataUrl.length - commaIdx - 1 : dataUrl.length;
+    const sizeBytes = Math.round((b64Len * 3) / 4);
+    return { dataUrl, width: w, height: h, sizeBytes };
+  };
+
+  for (const side of [maxLongSide, Math.min(800, maxLongSide), 640, 512]) {
+    for (const q of [0.84, 0.72, 0.58, 0.45, 0.35]) {
+      const attempt = tryEncode(side, q);
+      if (attempt.sizeBytes <= maxBytes) {
+        return attempt;
+      }
+    }
+  }
+  return tryEncode(480, 0.35);
+}
+

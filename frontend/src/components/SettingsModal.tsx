@@ -85,10 +85,11 @@ const SEARCH_ITEMS: SearchMatchEntry[] = [
   { title: "Memory management", section: "capabilities", keywords: "memory memories remember facts" },
   { title: "Reference past chats", section: "capabilities", keywords: "reference past chats history" },
   { title: "Web search default", section: "capabilities", keywords: "web search internet" },
+  { title: "Add AUTONEXIS mark to downloaded images", section: "capabilities", keywords: "image watermark download mark logo" },
   { title: "Read-aloud Voice, Call Mode & Mic language", section: "capabilities", keywords: "voice call speech tts stt mic speed preview captions barge-in silence earphones hindi" },
   { title: "Enter sends, Auto-scroll & Starter prompts", section: "capabilities", keywords: "enter ctrl send scroll starter prompts" },
   { title: "Background notifications & chime sound", section: "notifications", keywords: "notification alert sound chime" },
-  { title: "Export, Delete chats & Temporary default", section: "privacy", keywords: "export json delete temporary clear device data" },
+  { title: "Export, Delete chats, Clean up storage & Temporary default", section: "privacy", keywords: "export json delete temporary clear device data clean up storage orphan" },
   { title: "Break reminder timer", section: "wellbeing", keywords: "break reminder 60 90 120 minutes" },
   { title: "Support resources (India helplines)", section: "wellbeing", subView: "support-resources", keywords: "helpline india tele-manas kiran nimhans icall support" },
   { title: "Custom writing styles", section: "customize", keywords: "custom style writing tone sample" },
@@ -174,6 +175,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     clearAllMemories,
     clearAllChats,
     exportMyChats,
+    cleanupStorage,
   } = useChats();
 
   const t = (key: string) => translate(key, preferences.interfaceLanguage);
@@ -209,6 +211,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [confirmDeleteAllChats, setConfirmDeleteAllChats] = useState(false);
   const [confirmClearDevice, setConfirmClearDevice] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isCleaningStorage, setIsCleaningStorage] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Custom styles state
@@ -1218,6 +1221,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
 
+              <div className="settings-subsection-title">Images</div>
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Add AUTONEXIS mark to downloaded images</span>
+                  <span className="settings-item-desc">
+                    Keep image previews clean; when enabled, adds a subtle AUTONEXIS mark to downloaded JPEGs.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!preferences.addDownloadWatermark}
+                  aria-label="Add AUTONEXIS mark to downloaded images"
+                  className={`settings-toggle-btn ${preferences.addDownloadWatermark ? "active" : ""}`}
+                  onClick={() => updatePreferences({ addDownloadWatermark: !preferences.addDownloadWatermark })}
+                >
+                  <span className="settings-toggle-knob" />
+                </button>
+              </div>
+
               <div className="settings-subsection-title">Voice &amp; Live Calls</div>
               {ttsSupported ? (
                 <>
@@ -1634,6 +1657,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </Button>
                   </div>
                 )}
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <span className="settings-item-title">Clean up storage</span>
+                  <span className="settings-item-desc">
+                    Remove leftover image assets, orphaned messages, or dangling entries from deleted chats.
+                  </span>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={isGuest || isCleaningStorage}
+                  onClick={async () => {
+                    setIsCleaningStorage(true);
+                    const res = await cleanupStorage();
+                    setIsCleaningStorage(false);
+                    if (res.error) {
+                      showTempNotice(res.error);
+                    } else if (res.removedCount > 0) {
+                      showTempNotice(`Removed ${res.removedCount} orphaned item${res.removedCount === 1 ? "" : "s"}.`);
+                    } else {
+                      showTempNotice("Removed 0 orphaned items — storage is clean.");
+                    }
+                  }}
+                >
+                  {isCleaningStorage ? "Cleaning..." : "Clean up storage"}
+                </Button>
               </div>
 
               <div className="settings-row">
@@ -2206,6 +2257,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </p>
                 <p>
                   <strong>Guest mode:</strong> Guest sessions remain only inside your browser&apos;s local storage and are cleared on request via &ldquo;Clear data on this device&rdquo;.
+                </p>
+                <p>
+                  <strong>Image generation:</strong> Prompts for requested images are sent through our server to a third-party image generation service, and images are generated privately. Up to your latest 20 generated images are kept in cloud storage while prompt text and generation settings stay in your chat history until you delete the chat.
                 </p>
                 <p>
                   <strong>No cross-account sharing:</strong> Conversations and memories from one account are strictly isolated from other accounts.

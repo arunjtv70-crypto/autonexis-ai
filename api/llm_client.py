@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import json
 import logging
@@ -7,11 +8,14 @@ from typing import AsyncGenerator, List, Dict, Any, Optional, Union
 import httpx
 from config import settings
 from math_engine import EXACT_MATH_TOOL_DEFINITION, execute_exact_math, is_math_request
+from image_service import ImageServiceError, execute_image_generation
+from image_blocklist import detect_script_language
 from prompts import (
     MATH_PROMPT,
     ABUSE_AND_SAFETY_PROMPT,
     TABLE_AND_LAYOUT_PROMPT,
     IMAGE_REASONING_PROMPT,
+    IMAGE_GENERATION_CHAT_SAFETY_PROMPT,
     MEMORY_EXTRACTION_SYSTEM_PROMPT,
     ATTACHED_FILE_SAFETY_PROMPT,
     STYLE_ANALYSIS_SYSTEM_PROMPT,
@@ -28,6 +32,32 @@ logging.basicConfig(level=logging.INFO)
 
 FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
 VISION_ERROR_MESSAGE = "I couldn't read this image. Please try a smaller or clearer one."
+
+GENERATE_IMAGE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "generate_image",
+        "description": "Generate an actual image when the user asks to create, draw, or show a new visual picture, photo, logo, or poster.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Concise visual description of what image to generate",
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["Realistic photo", "Cinematic", "Illustration", "Anime", "3D render", "Minimal logo"],
+                },
+                "aspect": {
+                    "type": "string",
+                    "enum": ["1:1", "4:5", "16:9", "9:16"],
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+}
 
 WEB_SEARCH_TOOL_DEFINITION = {
     "type": "function",
@@ -251,11 +281,12 @@ class LLMClient:
         # Always include abuse & safety policy
         extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
 
-        # Include voice live-call instructions when voice=True, otherwise mobile layout/table policy
+        # Include voice live-call instructions when voice=True, otherwise mobile layout/table & image safety policy
         if voice:
             extra_system_context.append(VOICE_PROMPT)
         else:
             extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
+            extra_system_context.append(IMAGE_GENERATION_CHAT_SAFETY_PROMPT)
 
         # Include user personalization context block (nickname, role, preferences, memories, styles)
         if user_context:
@@ -416,12 +447,90 @@ class LLMClient:
         custom_style: Optional[Dict[str, Any]] = None,
         is_guest: bool = False,
         voice: bool = False,
+        uid: Optional[str] = None,
+        router_result: Optional[Dict[str, Any]] = None,
+        image_style: Optional[str] = None,
+        image_aspect: Optional[str] = None,
+        image_seed: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Streams completion tokens as Server-Sent Events (SSE) data chunks.
-        For mathematical or live web search inquiries, resolves tool calls before streaming.
-        Applies backend profanity safeguard to guarantee no profanity ever reaches the user.
+        Runs deterministic image router first when provided; otherwise runs chat LLM.
         """
+        last_user_text = get_last_user_text(messages)
+
+        if router_result:
+            safe_router = {
+                "intent": router_result.get("intent", "chat"),
+                "confidence": router_result.get("confidence", 0.95),
+                "reason": router_result.get("reason", "rule:default_chat"),
+            }
+            yield f"data: {json.dumps({'type': 'router_meta', 'router': safe_router}, ensure_ascii=False)}\n\n"
+
+            if not voice and safe_router["intent"] in ("image", "image_edit"):
+                lang = detect_script_language(last_user_text)
+                if is_guest or not uid or uid == "guest":
+                    guest_msg = (
+                        "इमेज बनाने के लिए कृपया लॉग इन करें। गेस्ट मोड में इमेज जनरेशन उपलब्ध नहीं है।"
+                        if lang == "hi"
+                        else "Image banane ke liye please sign in karein. Guest mode mein image generation available nahi hai."
+                        if lang == "hinglish"
+                        else "Please sign in to create images. Image generation is available for logged-in accounts."
+                    )
+                    yield f"data: {json.dumps({'type': 'image_guest_blocked', 'content': guest_msg, 'router': safe_router}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                chosen_style = image_style or router_result.get("style")
+                chosen_aspect = image_aspect or router_result.get("aspect")
+                yield f"data: {json.dumps({'type': 'image_status', 'stage': 'generating', 'aspect': chosen_aspect or '1:1', 'style': chosen_style or 'Auto', 'router': safe_router}, ensure_ascii=False)}\n\n"
+                try:
+                    img_res = await execute_image_generation(
+                        uid=uid,
+                        user_request=last_user_text,
+                        style=chosen_style,
+                        aspect=chosen_aspect,
+                        seed=image_seed if image_seed is not None else router_result.get("previous_seed"),
+                        previous_prompt=router_result.get("previous_prompt"),
+                        is_edit=(safe_router["intent"] == "image_edit"),
+                    )
+                    b64 = base64.b64encode(img_res["jpeg_bytes"]).decode("ascii")
+                    payload_event = {
+                        "type": "image_result",
+                        "image_data_url": f"data:image/jpeg;base64,{b64}",
+                        "original_request": img_res["original_request"],
+                        "subject": img_res["subject"],
+                        "final_prompt": img_res["final_prompt"],
+                        "style": img_res["style"],
+                        "aspect": img_res["aspect"],
+                        "width": img_res["width"],
+                        "height": img_res["height"],
+                        "seed": img_res["seed"],
+                        "model": img_res["model"],
+                        "caption": img_res["caption"],
+                        "anonymous_mode": img_res["anonymous_mode"],
+                        "warnings": img_res["warnings"],
+                        "router": safe_router,
+                    }
+                    yield f"data: {json.dumps(payload_event, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                except ImageServiceError as ierr:
+                    err_event = {
+                        "type": "image_blocked" if ierr.blocked else "image_error",
+                        "blocked": ierr.blocked,
+                        "category": ierr.category,
+                        "rate_limited": ierr.rate_limited,
+                        "retry_after": ierr.retry_after,
+                        "message": ierr.message,
+                        "moderation_log": ierr.moderation_log,
+                        "content": ierr.message,
+                        "router": safe_router,
+                    }
+                    yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -430,7 +539,6 @@ class LLMClient:
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
-        last_user_text = get_last_user_text(messages)
         fallback_error_msg = (
             "Voice is busy, please try again shortly"
             if voice
@@ -440,7 +548,9 @@ class LLMClient:
         has_tavily = bool(_get_tavily_key())
         web_search_requested = bool(user_context and user_context.get("web_search"))
         use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
-        needs_tool_loop = is_math or use_web_tool
+        is_borderline_image = bool(router_result and router_result.get("intent") == "chat" and float(router_result.get("confidence", 1.0)) <= 0.65)
+        use_image_tool_backup = (not voice and not is_guest and bool(uid) and is_borderline_image)
+        needs_tool_loop = is_math or use_web_tool or use_image_tool_backup
 
         voice_max_tokens = 340 if _CODE_OR_TABLE_RE.search(last_user_text or "") else 250
 
@@ -464,6 +574,8 @@ class LLMClient:
                 tools.append(EXACT_MATH_TOOL_DEFINITION)
             if use_web_tool:
                 tools.append(WEB_SEARCH_TOOL_DEFINITION)
+            if use_image_tool_backup:
+                tools.append(GENERATE_IMAGE_TOOL_DEFINITION)
 
             try:
                 timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
@@ -510,6 +622,51 @@ class LLMClient:
                                     result_str = execute_exact_math(args.get("expression", ""))
                                 elif fn_name == "web_search":
                                     result_str = await execute_web_search(args.get("query", ""))
+                                elif fn_name == "generate_image" and uid and uid != "guest":
+                                    yield f"data: {json.dumps({'type': 'image_status', 'stage': 'generating', 'aspect': args.get('aspect') or '1:1', 'style': args.get('style') or 'Auto', 'router': {'intent': 'image', 'confidence': 0.85, 'reason': 'tool:generate_image'}}, ensure_ascii=False)}\n\n"
+                                    try:
+                                        img_res = await execute_image_generation(
+                                            uid=uid,
+                                            user_request=str(args.get("prompt") or last_user_text),
+                                            style=args.get("style"),
+                                            aspect=args.get("aspect"),
+                                        )
+                                        b64 = base64.b64encode(img_res["jpeg_bytes"]).decode("ascii")
+                                        payload_event = {
+                                            "type": "image_result",
+                                            "image_data_url": f"data:image/jpeg;base64,{b64}",
+                                            "original_request": last_user_text,
+                                            "subject": img_res["subject"],
+                                            "final_prompt": img_res["final_prompt"],
+                                            "style": img_res["style"],
+                                            "aspect": img_res["aspect"],
+                                            "width": img_res["width"],
+                                            "height": img_res["height"],
+                                            "seed": img_res["seed"],
+                                            "model": img_res["model"],
+                                            "caption": img_res["caption"],
+                                            "anonymous_mode": img_res["anonymous_mode"],
+                                            "warnings": img_res["warnings"],
+                                            "router": {"intent": "image", "confidence": 0.85, "reason": "tool:generate_image"},
+                                        }
+                                        yield f"data: {json.dumps(payload_event, ensure_ascii=False)}\n\n"
+                                        yield "data: [DONE]\n\n"
+                                        return
+                                    except ImageServiceError as ierr:
+                                        err_event = {
+                                            "type": "image_blocked" if ierr.blocked else "image_error",
+                                            "blocked": ierr.blocked,
+                                            "category": ierr.category,
+                                            "rate_limited": ierr.rate_limited,
+                                            "retry_after": ierr.retry_after,
+                                            "message": ierr.message,
+                                            "moderation_log": ierr.moderation_log,
+                                            "content": ierr.message,
+                                            "router": {"intent": "image", "confidence": 0.85, "reason": "tool:generate_image"},
+                                        }
+                                        yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+                                        yield "data: [DONE]\n\n"
+                                        return
                                 else:
                                     result_str = f"Error: Unknown tool '{fn_name}'"
                             except Exception as parse_err:
@@ -687,10 +844,64 @@ class LLMClient:
         custom_style: Optional[Dict[str, Any]] = None,
         is_guest: bool = False,
         voice: bool = False,
-    ) -> Dict[str, str]:
+        uid: Optional[str] = None,
+        router_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
-        Non-streaming completion fallback with profanity safeguard.
+        Non-streaming completion fallback with profanity safeguard and image router support.
         """
+        last_user_text = get_last_user_text(messages)
+        if router_result and not voice and router_result.get("intent") in ("image", "image_edit"):
+            safe_router = {
+                "intent": router_result.get("intent", "image"),
+                "confidence": router_result.get("confidence", 0.95),
+                "reason": router_result.get("reason", "rule"),
+            }
+            lang = detect_script_language(last_user_text)
+            if is_guest or not uid or uid == "guest":
+                return {
+                    "reply": (
+                        "Please sign in to create images. Image generation is available for logged-in accounts."
+                        if lang == "en"
+                        else "Image banane ke liye please sign in karein. Guest mode mein image generation available nahi hai."
+                        if lang == "hinglish"
+                        else "इमेज बनाने के लिए कृपया लॉग इन करें। गेस्ट मोड में इमेज जनरेशन उपलब्ध नहीं है।"
+                    ),
+                    "router": safe_router,
+                }
+            try:
+                img_res = await execute_image_generation(
+                    uid=uid,
+                    user_request=last_user_text,
+                    style=router_result.get("style"),
+                    aspect=router_result.get("aspect"),
+                    seed=router_result.get("previous_seed"),
+                    previous_prompt=router_result.get("previous_prompt"),
+                    is_edit=(safe_router["intent"] == "image_edit"),
+                )
+                b64 = base64.b64encode(img_res["jpeg_bytes"]).decode("ascii")
+                return {
+                    "reply": img_res["caption"],
+                    "image_result": {
+                        "image_data_url": f"data:image/jpeg;base64,{b64}",
+                        "original_request": img_res["original_request"],
+                        "subject": img_res["subject"],
+                        "final_prompt": img_res["final_prompt"],
+                        "style": img_res["style"],
+                        "aspect": img_res["aspect"],
+                        "width": img_res["width"],
+                        "height": img_res["height"],
+                        "seed": img_res["seed"],
+                        "model": img_res["model"],
+                        "caption": img_res["caption"],
+                        "anonymous_mode": img_res["anonymous_mode"],
+                        "warnings": img_res["warnings"],
+                    },
+                    "router": safe_router,
+                }
+            except ImageServiceError as ierr:
+                return {"reply": ierr.message, "blocked": ierr.blocked, "router": safe_router}
+
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -699,7 +910,6 @@ class LLMClient:
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
         is_math = is_math_request(messages)
-        last_user_text = get_last_user_text(messages)
         fallback_error_msg = (
             "Voice is busy, please try again shortly"
             if voice

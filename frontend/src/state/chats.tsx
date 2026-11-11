@@ -4,11 +4,15 @@ import {
   streamChatMessage,
   extractMemoriesApi,
   createCustomStyleApi,
+  generateImageApi,
   type ChatMessagePayload,
   type MultimodalPart,
+  type ImageRouterMeta,
+  type ImageGenerationResultPayload,
 } from "../api/client";
 import { APP_VERSION } from "../config";
 import { useAuth } from "./auth";
+import { compressImageDataUrlToJpeg } from "../utils/fileHelpers";
 import {
   loadChatList,
   loadChatMessages,
@@ -16,8 +20,18 @@ import {
   updateChatTitle as dbUpdateChatTitle,
   updateChatFlags as dbUpdateChatFlags,
   replaceMessageAndDeleteAfter as dbReplaceMessageAndDeleteAfter,
-  deleteOneChat as dbDeleteOneChat,
+  deleteChat as dbDeleteChat,
   deleteAllChats as dbDeleteAllChats,
+  saveMessageImageAsset,
+  loadMessageImageAsset,
+  deleteMessageImageAsset,
+  cleanupOrphanedStorage,
+  saveModerationLog,
+  saveImageReport,
+  markChatDeleting,
+  isChatDeletingOrDeleted,
+  clearAllDeleteTombstones,
+  recordStorageDebugTrace,
   loadUserPreferences,
   saveUserPreferences,
   loadUserMemories,
@@ -63,6 +77,18 @@ export interface MessageItem {
   mediaUrl?: string;
   mediaUrls?: string[];
   mediaPrompt?: string;
+  originalRequest?: string;
+  finalPrompt?: string;
+  style?: string;
+  aspect?: string;
+  width?: number;
+  height?: number;
+  seed?: number;
+  model?: string;
+  status?: "generating" | "ready" | "expired" | "deleted" | "error" | "blocked";
+  warnings?: string[];
+  errorMessage?: string;
+  routerMeta?: ImageRouterMeta;
   videoDuration?: string;
 }
 
@@ -197,8 +223,26 @@ export interface ChatsContextType {
   sendMessage: (
     content: string,
     mode?: "chat" | "image" | "video" | "voice",
-    attachment?: AttachmentPayload | null
+    attachment?: AttachmentPayload | null,
+    imageOptions?: { style?: string; aspect?: string; seed?: number; previousPrompt?: string; isEdit?: boolean }
   ) => Promise<void>;
+  imageStyle: string;
+  setImageStyle: (style: string) => void;
+  imageAspect: string;
+  setImageAspect: (aspect: string) => void;
+  loadLazyImageForMessage: (chatId: string, messageId: string) => Promise<string | null>;
+  regenerateMessageImage: (
+    chatId: string,
+    messageId: string,
+    overrides?: { variation?: boolean; editedPrompt?: string; style?: string; aspect?: string }
+  ) => Promise<void>;
+  deleteMessageImage: (chatId: string, messageId: string) => Promise<void>;
+  reportMessageImage: (chatId: string, messageId: string, reason?: string) => Promise<boolean>;
+  getFullQualityImageUrl: (messageId: string) => string | undefined;
+  cleanupStorage: () => Promise<{ removedCount: number; error?: string }>;
+  deleteErrorBanner: { chatId: string; message: string } | null;
+  retryFailedDelete: () => Promise<void>;
+  dismissDeleteError: () => void;
   runVoiceCallTurn: (
     spokenText: string,
     callbacks: VoiceTurnCallbacks
@@ -474,43 +518,128 @@ type PendingSave = {
     role: "user" | "assistant";
     content: string;
     mediaType?: "text" | "image" | "video" | "voice";
+    originalRequest?: string;
+    finalPrompt?: string;
+    style?: string;
+    aspect?: string;
+    width?: number;
+    height?: number;
+    seed?: number;
+    model?: string;
+    status?: "generating" | "ready" | "expired" | "deleted" | "error" | "blocked";
   }>;
   projectId?: string | null;
+  isExistingChat?: boolean;
   retries?: number;
 };
 
 const DEFAULT_RETRIES = 2;
 const RETRY_DELAY_MS = 2000;
+const _PENDING_RETRY_TIMERS = new Map<string, Set<number>>();
+
+const _CHAT_SAVE_QUEUES = new Map<string, Promise<void>>();
+const _CREATED_ON_SERVER_CHATS = new Set<string>();
+
+function cancelPendingSavesForChat(chatId: string): void {
+  const timers = _PENDING_RETRY_TIMERS.get(chatId);
+  if (timers) {
+    timers.forEach((tId) => window.clearTimeout(tId));
+    _PENDING_RETRY_TIMERS.delete(chatId);
+  }
+}
+
+function enqueueChatSave(chatId: string, fn: () => Promise<void>): Promise<void> {
+  const prev = _CHAT_SAVE_QUEUES.get(chatId) || Promise.resolve();
+  const next = prev.then(fn, fn).finally(() => {
+    if (_CHAT_SAVE_QUEUES.get(chatId) === next) {
+      _CHAT_SAVE_QUEUES.delete(chatId);
+    }
+  });
+  _CHAT_SAVE_QUEUES.set(chatId, next);
+  return next;
+}
 
 async function backgroundSave(
   save: PendingSave,
   setError: (msg: string | null) => void
 ): Promise<void> {
-  const maxAttempts = (save.retries ?? DEFAULT_RETRIES) + 1;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      await saveChatWithMessages(
-        save.uid,
-        save.chatId,
-        save.title,
-        save.messages,
-        save.projectId !== undefined ? { projectId: save.projectId } : undefined
-      );
-      setError(null);
-      return;
-    } catch (err: any) {
-      console.error(`[AUTONEXIS DB] Save failed (attempt ${attempt + 1}/${maxAttempts}):`, err);
-      if (attempt < maxAttempts - 1) {
-        setError("Couldn't save this chat. Retrying...");
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)));
-      } else {
-        const errMsg = err?.code === "permission-denied"
-          ? "Chat save failed: permission denied. Please log out and log back in."
-          : "Couldn't save this chat. Your messages are safe in memory.";
-        setError(errMsg);
+  return enqueueChatSave(save.chatId, async () => {
+    const maxAttempts = (save.retries ?? DEFAULT_RETRIES) + 1;
+    const isExisting = save.isExistingChat ?? _CREATED_ON_SERVER_CHATS.has(save.chatId);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (isChatDeletingOrDeleted(save.uid, save.chatId)) {
+        recordStorageDebugTrace("cancel_bg_save", `users/${save.uid}/chats/${save.chatId}`);
+        return;
+      }
+      try {
+        await saveChatWithMessages(
+          save.uid,
+          save.chatId,
+          save.title,
+          save.messages,
+          {
+            ...(save.projectId !== undefined ? { projectId: save.projectId } : {}),
+            isExistingChat: isExisting,
+          }
+        );
+        if (!isChatDeletingOrDeleted(save.uid, save.chatId)) {
+          _CREATED_ON_SERVER_CHATS.add(save.chatId);
+        }
+        setError(null);
+        return;
+      } catch (err: any) {
+        if (isChatDeletingOrDeleted(save.uid, save.chatId)) return;
+        if (err?.code === "not-found" && isExisting) {
+          recordStorageDebugTrace("stop_save_deleted_chat", `users/${save.uid}/chats/${save.chatId}`);
+          return;
+        }
+        console.error(`[AUTONEXIS DB] Save failed (attempt ${attempt + 1}/${maxAttempts}):`, err);
+        if (attempt < maxAttempts - 1) {
+          setError("Couldn't save this chat. Retrying...");
+          await new Promise<void>((resolve) => {
+            const timerId = window.setTimeout(() => {
+              _PENDING_RETRY_TIMERS.get(save.chatId)?.delete(timerId);
+              resolve();
+            }, RETRY_DELAY_MS * (attempt + 1));
+            if (!_PENDING_RETRY_TIMERS.has(save.chatId)) {
+              _PENDING_RETRY_TIMERS.set(save.chatId, new Set());
+            }
+            _PENDING_RETRY_TIMERS.get(save.chatId)!.add(timerId);
+          });
+        } else {
+          const errMsg = err?.code === "permission-denied"
+            ? "Chat save failed: permission denied. Please log out and log back in."
+            : "Couldn't save this chat. Your messages are safe in memory.";
+          setError(errMsg);
+        }
       }
     }
+  });
+}
+
+/** Detects unintended ASCII box/character drawings when user requested a normal image */
+function looksLikeAccidentalAsciiArt(userQuery: string, replyText: string): boolean {
+  if (!replyText || !userQuery) return false;
+  if (/\b(ascii|text\s*art|svg|html|css|python|javascript|code|script|tutorial)\b/i.test(userQuery)) {
+    return false;
   }
+  const fenceRegex = /```(?:plaintext|text)?\s*\r?\n([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRegex.exec(replyText)) !== null) {
+    const block = match[1] || "";
+    const lines = block.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length < 4) continue;
+    const joined = lines.join("");
+    const nonSpace = joined.replace(/\s/g, "");
+    if (nonSpace.length < 18) continue;
+    // Skip genuine code snippets
+    if (/\b(import|def|class|function|const|let|var|return|print|console)\b/.test(block)) continue;
+    const symbolCount = (nonSpace.match(/[^A-Za-z0-9\u0900-\u097F]/g) || []).length;
+    if (symbolCount / nonSpace.length >= 0.45) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Helper for extracting relevant file chunks via simple keyword matching (~6000 chars budget)
@@ -666,14 +795,42 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const lastDocRef = useRef<any>(null);
   const [hasMoreChats, setHasMoreChats] = useState(false);
 
-  // Firestore error state for calm messaging
+  // Firestore error state & delete retry banner for calm messaging
   const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  const [deleteErrorBanner, setDeleteErrorBanner] = useState<{ chatId: string; message: string } | null>(null);
+
+  // Image creation controls & in-memory full-quality cache
+  const [imageStyle, setImageStyle] = useState<string>("Auto");
+  const [imageAspect, setImageAspect] = useState<string>("Auto");
+  const fullQualityImagesRef = useRef<Map<string, string>>(new Map());
+  const chatAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
   // Track which chat messages have been loaded from Firestore
   const loadedChatIdsRef = useRef<Set<string>>(new Set());
 
   // Track message IDs already saved to Firestore to avoid double-writes
   const savedMsgIdsRef = useRef<Set<string>>(new Set());
+
+  const mapFirestoreMsgToItem = useCallback((m: FirestoreMessage): MessageItem => {
+    const inMemFull = fullQualityImagesRef.current.get(m.id);
+    return {
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      mediaType: m.mediaType || undefined,
+      mediaUrl: inMemFull || undefined,
+      originalRequest: m.originalRequest || undefined,
+      mediaPrompt: m.originalRequest || m.finalPrompt || undefined,
+      finalPrompt: m.finalPrompt || undefined,
+      style: m.style || undefined,
+      aspect: m.aspect || undefined,
+      width: m.width,
+      height: m.height,
+      seed: m.seed,
+      status: m.status || (m.mediaType === "image" ? "ready" : undefined),
+      created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+  }, []);
 
   // -----------------------------------------------------------------------
   // Load chats from Firestore on login / account switch
@@ -685,14 +842,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       loadedChatIdsRef.current = new Set();
       savedMsgIdsRef.current = new Set();
       const result = await loadChatList(uid, 50);
-      const chatItems: ChatItem[] = result.chats.map((meta: FirestoreChatMeta) => ({
+      const filteredMetas = result.chats.filter((meta: FirestoreChatMeta) => !isChatDeletingOrDeleted(uid, meta.id));
+      filteredMetas.forEach((meta) => _CREATED_ON_SERVER_CHATS.add(meta.id));
+
+      const existingChatsMap = new Map(chatsRef.current.map((c) => [c.id, c]));
+      const chatItems: ChatItem[] = filteredMetas.map((meta: FirestoreChatMeta) => ({
         id: meta.id,
         title: meta.title,
         updated_at: meta.updatedAt,
         pinned: !!meta.pinned,
         archived: !!meta.archived,
         projectId: meta.projectId || null,
-        messages: [],
+        messages: existingChatsMap.get(meta.id)?.messages || [],
         _messagesLoaded: false,
       }));
       lastDocRef.current = result.lastDoc;
@@ -710,7 +871,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setActiveChatId(fresh.id);
         }
       } else {
-        const defaultActive = chatItems.find((c) => !c.archived) || chatItems[0];
+        const currentActive = activeChatIdRef.current;
+        const defaultActive =
+          (currentActive && chatItems.find((c) => c.id === currentActive)) ||
+          chatItems.find((c) => !c.archived) ||
+          chatItems[0];
         setChats(chatItems);
         setActiveChatId(defaultActive.id);
         // Eagerly load messages + feedback for the active chat
@@ -719,13 +884,16 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             loadChatMessages(uid, defaultActive.id),
             loadChatFeedback(uid, defaultActive.id),
           ]);
-          const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => ({
-            id: m.id,
-            role: m.role,
-            content: m.content,
-            mediaType: m.mediaType || undefined,
-            created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          }));
+          const prevMediaById = new Map(
+            (existingChatsMap.get(defaultActive.id)?.messages || [])
+              .filter((m) => !!m.mediaUrl)
+              .map((m) => [m.id, m.mediaUrl!])
+          );
+          const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => {
+            const item = mapFirestoreMsgToItem(m);
+            const preservedUrl = item.mediaUrl || prevMediaById.get(m.id);
+            return preservedUrl ? { ...item, mediaUrl: preservedUrl } : item;
+          });
           loadedChatIdsRef.current.add(defaultActive.id);
           msgs.forEach((m) => savedMsgIdsRef.current.add(m.id));
           setChats((prev) =>
@@ -750,7 +918,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setChats([fresh]);
       setActiveChatId(fresh.id);
     }
-  }, []);
+  }, [mapFirestoreMsgToItem]);
 
   // -----------------------------------------------------------------------
   // Load more chats (pagination)
@@ -759,7 +927,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!isAuthenticated || !currentUid || !lastDocRef.current) return;
     try {
       const result = await loadChatList(currentUid, 50, lastDocRef.current);
-      const newItems: ChatItem[] = result.chats.map((meta: FirestoreChatMeta) => ({
+      const filteredMetas = result.chats.filter(
+        (meta: FirestoreChatMeta) => !isChatDeletingOrDeleted(currentUid, meta.id)
+      );
+      filteredMetas.forEach((meta) => _CREATED_ON_SERVER_CHATS.add(meta.id));
+      const newItems: ChatItem[] = filteredMetas.map((meta: FirestoreChatMeta) => ({
         id: meta.id,
         title: meta.title,
         updated_at: meta.updatedAt,
@@ -771,7 +943,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }));
       lastDocRef.current = result.lastDoc;
       setHasMoreChats(result.chats.length === 50);
-      setChats((prev) => [...prev, ...newItems]);
+      setChats((prev) => {
+        const existingIds = new Set(prev.map((c) => c.id));
+        return [...prev, ...newItems.filter((n) => !existingIds.has(n.id))];
+      });
     } catch (err) {
       console.error("[AUTONEXIS DB] Failed to load more chats:", err);
     }
@@ -781,19 +956,21 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Load messages for a specific chat when selected
   // -----------------------------------------------------------------------
   const loadMessagesForChat = useCallback(async (uid: string, chatId: string) => {
-    if (!uid || uid === "guest" || loadedChatIdsRef.current.has(chatId)) return;
+    if (!uid || uid === "guest" || loadedChatIdsRef.current.has(chatId) || isChatDeletingOrDeleted(uid, chatId)) return;
     try {
       const [msgs, fb] = await Promise.all([
         loadChatMessages(uid, chatId),
         loadChatFeedback(uid, chatId),
       ]);
-      const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        mediaType: m.mediaType || undefined,
-        created_at: new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      }));
+      const existingMsgs = chatsRef.current.find((c) => c.id === chatId)?.messages || [];
+      const prevMediaById = new Map(
+        existingMsgs.filter((m) => !!m.mediaUrl).map((m) => [m.id, m.mediaUrl!])
+      );
+      const messageItems: MessageItem[] = msgs.map((m: FirestoreMessage) => {
+        const item = mapFirestoreMsgToItem(m);
+        const preservedUrl = item.mediaUrl || prevMediaById.get(m.id);
+        return preservedUrl ? { ...item, mediaUrl: preservedUrl } : item;
+      });
       loadedChatIdsRef.current.add(chatId);
       msgs.forEach((m) => savedMsgIdsRef.current.add(m.id));
       setChats((prev) =>
@@ -807,7 +984,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch (err) {
       console.warn("[AUTONEXIS DB] Failed to load messages for chat:", chatId, err);
     }
-  }, []);
+  }, [mapFirestoreMsgToItem]);
 
   // -----------------------------------------------------------------------
   // Load preferences, memories, and projects from Firestore
@@ -889,11 +1066,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // -----------------------------------------------------------------------
   useEffect(() => {
     if (activeUidRef.current !== currentUid) {
-      // 1. Abort any in-flight stream
+      // 1. Abort all in-flight streams and image generation requests
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      chatAbortControllersRef.current.forEach((ctrl) => ctrl.abort());
+      chatAbortControllersRef.current.clear();
+      Array.from(_PENDING_RETRY_TIMERS.keys()).forEach(cancelPendingSavesForChat);
+      fullQualityImagesRef.current.clear();
+      _CREATED_ON_SERVER_CHATS.clear();
+      clearAllDeleteTombstones();
+      setDeleteErrorBanner(null);
       setIsSending(false);
 
       // 2. Update active UID ref
@@ -1602,6 +1786,13 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    chatAbortControllersRef.current.forEach((ctrl) => ctrl.abort());
+    chatAbortControllersRef.current.clear();
+    Array.from(_PENDING_RETRY_TIMERS.keys()).forEach(cancelPendingSavesForChat);
+    fullQualityImagesRef.current.clear();
+    _CREATED_ON_SERVER_CHATS.clear();
+    clearAllDeleteTombstones();
+    setDeleteErrorBanner(null);
     const fresh = createEmptyChat();
     setChats([fresh]);
     setActiveChatId(fresh.id);
@@ -1726,26 +1917,93 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  const deleteChat = (id: string) => {
+  const abortChatOperations = useCallback((chatId: string) => {
+    cancelPendingSavesForChat(chatId);
+    const ctrl = chatAbortControllersRef.current.get(chatId);
+    if (ctrl) {
+      ctrl.abort();
+      chatAbortControllersRef.current.delete(chatId);
+    }
+    if (activeChatIdRef.current === chatId && abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsSending(false);
+    }
+  }, []);
+
+  const deleteChat = async (id: string) => {
+    const prevList = chatsRef.current;
+    const idx = prevList.findIndex((c) => c.id === id);
+    const targetChat = idx >= 0 ? prevList[idx] : null;
+    const wasActive = activeChatIdRef.current === id;
+
+    abortChatOperations(id);
+    if (targetChat) {
+      targetChat.messages.forEach((m) => fullQualityImagesRef.current.delete(m.id));
+    }
+
+    const hadServerRecord = _CREATED_ON_SERVER_CHATS.has(id) || (!!targetChat && targetChat.messages.length > 0 && !targetChat._isTemporary);
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      markChatDeleting(currentUid, id);
+    }
+
+    let createdFallbackChat: ChatItem | null = null;
     setChats((prev) => {
       const remaining = prev.filter((c) => c.id !== id);
-      if (activeChatId === id) {
+      if (wasActive) {
         if (remaining.length > 0) {
           setActiveChatId(remaining[0].id);
         } else {
-          const freshChat = createEmptyChat();
-          setActiveChatId(freshChat.id);
-          return [freshChat];
+          createdFallbackChat = createEmptyChat();
+          setActiveChatId(createdFallbackChat.id);
+          return [createdFallbackChat];
         }
       }
       return remaining;
     });
-    // Background Firestore delete
-    if (isAuthenticated && currentUid) {
-      dbDeleteOneChat(currentUid, id).catch((err) => {
+
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      const targetUid = currentUid;
+      try {
+        if (hadServerRecord) {
+          await dbDeleteChat(targetUid, id);
+        }
+        _CREATED_ON_SERVER_CHATS.delete(id);
+        loadedChatIdsRef.current.delete(id);
+        if (deleteErrorBanner?.chatId === id) {
+          setDeleteErrorBanner(null);
+        }
+      } catch (err) {
         console.error("[AUTONEXIS DB] Failed to delete chat:", err);
-      });
+        if (targetChat) {
+          setChats((prev) => {
+            if (prev.some((c) => c.id === targetChat.id)) return prev;
+            const filtered = createdFallbackChat ? prev.filter((c) => c.id !== createdFallbackChat!.id) : [...prev];
+            const insertAt = Math.max(0, Math.min(idx, filtered.length));
+            filtered.splice(insertAt, 0, targetChat);
+            return filtered;
+          });
+          if (wasActive) {
+            setActiveChatId(targetChat.id);
+          }
+        }
+        setDeleteErrorBanner({
+          chatId: id,
+          message: "Couldn't delete chat right now. Your chat was restored so nothing is lost.",
+        });
+      }
     }
+  };
+
+  const retryFailedDelete = async () => {
+    if (!deleteErrorBanner) return;
+    const targetId = deleteErrorBanner.chatId;
+    setDeleteErrorBanner(null);
+    await deleteChat(targetId);
+  };
+
+  const dismissDeleteError = () => {
+    setDeleteErrorBanner(null);
   };
 
   const renameChat = (id: string, newTitle: string) => {
@@ -1762,20 +2020,125 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  const clearAllChats = () => {
+  const clearAllChats = async () => {
+    const oldIds = chatsRef.current.map((c) => c.id);
+    oldIds.forEach((id) => {
+      abortChatOperations(id);
+      if (isAuthenticated && currentUid && currentUid !== "guest") {
+        markChatDeleting(currentUid, id);
+      }
+    });
+    fullQualityImagesRef.current.clear();
+    _CREATED_ON_SERVER_CHATS.clear();
+    setDeleteErrorBanner(null);
+
     const freshChat = createEmptyChat();
     setChats([freshChat]);
     setActiveChatId(freshChat.id);
     loadedChatIdsRef.current = new Set();
     savedMsgIdsRef.current = new Set();
     // Background Firestore delete all
-    if (isAuthenticated && currentUid) {
-      dbDeleteAllChats(currentUid).catch((err) => {
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      try {
+        await dbDeleteAllChats(currentUid);
+      } catch (err) {
         console.error("[AUTONEXIS DB] Failed to delete all chats:", err);
-      });
+        setFirestoreError("Couldn't remove all cloud chats right now. Please try again.");
+      }
     }
     if (currentUid === "guest") {
       saveGuestChats([freshChat]);
+    }
+  };
+
+  const getFullQualityImageUrl = (messageId: string): string | undefined => {
+    return fullQualityImagesRef.current.get(messageId);
+  };
+
+  const loadLazyImageForMessage = async (chatId: string, messageId: string): Promise<string | null> => {
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    const existing = chat?.messages.find((m) => m.id === messageId);
+    if (existing?.mediaUrl) return existing.mediaUrl;
+    const inMem = fullQualityImagesRef.current.get(messageId);
+    if (inMem) return inMem;
+    if (!isAuthenticated || !currentUid || currentUid === "guest") return null;
+
+    const loaded = await loadMessageImageAsset(currentUid, chatId, messageId);
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === messageId
+                  ? loaded
+                    ? { ...m, mediaUrl: loaded, status: "ready" }
+                    : { ...m, status: m.status === "deleted" ? "deleted" : "expired" }
+                  : m
+              ),
+            }
+          : c
+      )
+    );
+    return loaded;
+  };
+
+  const deleteMessageImage = async (chatId: string, messageId: string): Promise<void> => {
+    fullQualityImagesRef.current.delete(messageId);
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === messageId ? { ...m, mediaUrl: undefined, status: "deleted" } : m
+              ),
+            }
+          : c
+      )
+    );
+    if (isAuthenticated && currentUid && currentUid !== "guest") {
+      await deleteMessageImageAsset(currentUid, chatId, messageId).catch((err) => {
+        console.warn("[AUTONEXIS DB] Failed deleting image asset:", err);
+      });
+    }
+  };
+
+  const reportMessageImage = async (chatId: string, messageId: string, reason?: string): Promise<boolean> => {
+    if (!isAuthenticated || !currentUid || currentUid === "guest") return false;
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    const msg = chat?.messages.find((m) => m.id === messageId);
+    if (!msg) return false;
+    try {
+      await saveImageReport(currentUid, {
+        chatId,
+        messageId,
+        originalRequest: msg.originalRequest || msg.mediaPrompt,
+        finalPrompt: msg.finalPrompt,
+        style: msg.style,
+        aspect: msg.aspect,
+        width: msg.width,
+        height: msg.height,
+        seed: msg.seed,
+        reason,
+      });
+      return true;
+    } catch (err) {
+      console.warn("[AUTONEXIS DB] Failed reporting image:", err);
+      return false;
+    }
+  };
+
+  const cleanupStorage = async (): Promise<{ removedCount: number; error?: string }> => {
+    if (!isAuthenticated || !currentUid || currentUid === "guest") {
+      return { removedCount: 0, error: "Sign in to clean up cloud storage." };
+    }
+    try {
+      const res = await cleanupOrphanedStorage(currentUid);
+      return { removedCount: res.removedCount };
+    } catch (err) {
+      console.warn("[AUTONEXIS DB] Storage cleanup failed:", err);
+      return { removedCount: 0, error: "Could not complete storage cleanup right now." };
     }
   };
 
@@ -1972,6 +2335,305 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return selectRelevantProjectContext(proj, files, latestQuery);
   };
 
+  const updateMessageInChat = useCallback((chatId: string, msgId: string, patch: Partial<MessageItem>) => {
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId
+          ? {
+              ...c,
+              messages: c.messages.map((m) => (m.id === msgId ? { ...m, ...patch } : m)),
+            }
+          : c
+      )
+    );
+  }, []);
+
+  const persistGeneratedImageForMessage = useCallback(
+    async (params: {
+      uid: string | null;
+      chatId: string;
+      msgId: string;
+      autoTitle: string;
+      isTemp: boolean;
+      projectId?: string | null;
+      payload: ImageGenerationResultPayload;
+    }) => {
+      const { uid, chatId, msgId, autoTitle, isTemp, projectId, payload } = params;
+      if (isChatDeletingOrDeleted(uid || "", chatId)) return;
+
+      // Preserve uncompressed full-quality Data URL in memory for crisp Download / Lightbox
+      fullQualityImagesRef.current.set(msgId, payload.image_data_url);
+
+      updateMessageInChat(chatId, msgId, {
+        mediaType: "image",
+        mediaUrl: payload.image_data_url,
+        content: payload.caption,
+        mediaPrompt: payload.original_request,
+        originalRequest: payload.original_request,
+        finalPrompt: payload.final_prompt,
+        style: payload.style,
+        aspect: payload.aspect,
+        width: payload.width,
+        height: payload.height,
+        seed: payload.seed,
+        status: "ready",
+        warnings: payload.warnings,
+        errorMessage: undefined,
+        routerMeta: payload.router,
+      });
+
+      if (isTemp || !isAuthenticated || !uid || uid === "guest") return;
+
+      try {
+        const compressed = await compressImageDataUrlToJpeg(payload.image_data_url, {
+          maxLongSide: 1024,
+          maxBytes: 150 * 1024,
+        });
+        if (isChatDeletingOrDeleted(uid, chatId)) return;
+
+        if (!savedMsgIdsRef.current.has(msgId)) {
+          savedMsgIdsRef.current.add(msgId);
+          await backgroundSave(
+            {
+              uid,
+              chatId,
+              title: autoTitle,
+              projectId: projectId ?? null,
+              messages: [
+                {
+                  id: msgId,
+                  role: "assistant",
+                  content: payload.caption,
+                  mediaType: "image",
+                  originalRequest: payload.original_request,
+                  finalPrompt: payload.final_prompt,
+                  style: payload.style,
+                  aspect: payload.aspect,
+                  width: payload.width,
+                  height: payload.height,
+                  seed: payload.seed,
+                  status: "ready",
+                },
+              ],
+            },
+            setFirestoreError
+          );
+        }
+
+        if (isChatDeletingOrDeleted(uid, chatId)) return;
+        await saveMessageImageAsset(uid, chatId, msgId, compressed);
+      } catch (err) {
+        console.warn("[AUTONEXIS DB] Failed saving compressed image asset:", err);
+      }
+    },
+    [isAuthenticated, updateMessageInChat]
+  );
+
+  const runImageGenerationIntoMessage = useCallback(
+    async (params: {
+      uid: string | null;
+      chatId: string;
+      msgId: string;
+      autoTitle: string;
+      isTemp: boolean;
+      projectId?: string | null;
+      prompt: string;
+      style?: string;
+      aspect?: string;
+      seed?: number;
+      previousPrompt?: string;
+      isEdit?: boolean;
+      explicitMode?: boolean;
+      controller: AbortController;
+    }) => {
+      const {
+        uid,
+        chatId,
+        msgId,
+        autoTitle,
+        isTemp,
+        projectId,
+        prompt,
+        style,
+        aspect,
+        seed,
+        previousPrompt,
+        isEdit,
+        explicitMode,
+        controller,
+      } = params;
+
+      const res = await generateImageApi({
+        prompt,
+        style,
+        aspect,
+        seed,
+        previousPrompt,
+        isEdit,
+        explicitMode,
+        signal: controller.signal,
+      });
+
+      if (activeUidRef.current !== uid || controller.signal.aborted || isChatDeletingOrDeleted(uid || "", chatId)) {
+        return;
+      }
+
+      if (res.ok && res.data) {
+        await persistGeneratedImageForMessage({
+          uid,
+          chatId,
+          msgId,
+          autoTitle,
+          isTemp,
+          projectId,
+          payload: res.data,
+        });
+        return;
+      }
+
+      if (res.blocked) {
+        if (!isTemp && isAuthenticated && uid && uid !== "guest") {
+          saveModerationLog(uid, {
+            category: res.category || "blocked",
+            cooldownTriggered: !!res.moderation_log?.cooldown_triggered,
+          }).catch(() => {});
+        }
+        const calmRefusal = res.error || "I can't create that image. Let me know if you'd like something else.";
+        updateMessageInChat(chatId, msgId, {
+          mediaType: "text",
+          mediaUrl: undefined,
+          status: "blocked",
+          content: calmRefusal,
+          errorMessage: undefined,
+          routerMeta: res.router,
+        });
+        if (!isTemp && isAuthenticated && uid && uid !== "guest" && !savedMsgIdsRef.current.has(msgId)) {
+          savedMsgIdsRef.current.add(msgId);
+          backgroundSave(
+            {
+              uid,
+              chatId,
+              title: autoTitle,
+              projectId: projectId ?? null,
+              messages: [{ id: msgId, role: "assistant", content: calmRefusal, status: "blocked" }],
+            },
+            setFirestoreError
+          );
+        }
+        return;
+      }
+
+      if (res.error === "Cancelled") return;
+
+      const errMsg = res.error || "Could not create this image right now. Please try again.";
+      updateMessageInChat(chatId, msgId, {
+        mediaType: "image",
+        mediaUrl: undefined,
+        status: "error",
+        content: errMsg,
+        errorMessage: errMsg,
+        originalRequest: prompt,
+        mediaPrompt: prompt,
+        style: style || "Auto",
+        aspect: aspect || "Auto",
+        seed,
+        routerMeta: res.router,
+      });
+    },
+    [isAuthenticated, persistGeneratedImageForMessage, updateMessageInChat]
+  );
+
+  const regenerateMessageImage = async (
+    chatId: string,
+    messageId: string,
+    overrides?: { variation?: boolean; editedPrompt?: string; style?: string; aspect?: string }
+  ) => {
+    if (isSending) return;
+    if (isGuest) {
+      setShowGuestLimitModal(true);
+      return;
+    }
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    const targetMsg = chat?.messages.find((m) => m.id === messageId);
+    if (!chat || !targetMsg) return;
+
+    const promptText = (overrides?.editedPrompt || targetMsg.originalRequest || targetMsg.mediaPrompt || "").trim();
+    if (!promptText) return;
+
+    const useStyle = overrides?.style || targetMsg.style || imageStyle || "Auto";
+    const useAspect = overrides?.aspect || targetMsg.aspect || imageAspect || "Auto";
+    const useSeed = overrides?.variation || overrides?.editedPrompt ? undefined : targetMsg.seed;
+    const replaceInPlace =
+      !targetMsg.mediaUrl ||
+      targetMsg.status === "expired" ||
+      targetMsg.status === "deleted" ||
+      targetMsg.status === "error";
+
+    const targetMsgId = replaceInPlace ? messageId : "ast_" + Date.now();
+    const isTemp = isTemporaryChat || !!chat._isTemporary;
+
+    if (replaceInPlace) {
+      updateMessageInChat(chatId, messageId, {
+        mediaType: "image",
+        mediaUrl: undefined,
+        status: "generating",
+        errorMessage: undefined,
+        originalRequest: promptText,
+        mediaPrompt: promptText,
+        style: useStyle,
+        aspect: useAspect,
+        seed: useSeed,
+      });
+    } else {
+      const nextMsg: MessageItem = {
+        id: targetMsgId,
+        role: "assistant",
+        content: "",
+        mediaType: "image",
+        status: "generating",
+        originalRequest: promptText,
+        mediaPrompt: promptText,
+        style: useStyle,
+        aspect: useAspect,
+        seed: useSeed,
+        created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setChats((prev) =>
+        prev.map((c) => (c.id === chatId ? { ...c, messages: [...c.messages, nextMsg] } : c))
+      );
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    chatAbortControllersRef.current.set(chatId, controller);
+    setIsSending(true);
+
+    try {
+      await runImageGenerationIntoMessage({
+        uid: currentUid,
+        chatId,
+        msgId: targetMsgId,
+        autoTitle: chat.title,
+        isTemp,
+        projectId: chat.projectId ?? null,
+        prompt: promptText,
+        style: useStyle,
+        aspect: useAspect,
+        seed: useSeed,
+        explicitMode: true,
+        controller,
+      });
+    } finally {
+      if (chatAbortControllersRef.current.get(chatId) === controller) {
+        chatAbortControllersRef.current.delete(chatId);
+      }
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
+      setIsSending(false);
+    }
+  };
+
   const streamAssistantReply = async (params: {
     capturedChatId: string;
     autoTitle: string;
@@ -1980,8 +2642,18 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     trimmedQuery: string;
     historyPayload: ChatMessagePayload[];
     memoryPrompt: string;
+    recentContext?: Array<Record<string, any>>;
   }) => {
-    const { capturedChatId, autoTitle, isTemp, projectId, trimmedQuery, historyPayload, memoryPrompt } = params;
+    const {
+      capturedChatId,
+      autoTitle,
+      isTemp,
+      projectId,
+      trimmedQuery,
+      historyPayload,
+      memoryPrompt,
+      recentContext,
+    } = params;
     const assistantMsgId = "ast_" + Date.now();
 
     setChats((prev) =>
@@ -2009,11 +2681,13 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    chatAbortControllersRef.current.set(capturedChatId, controller);
     const requestUid = currentUid;
 
     let pendingBuffer = "";
     let displayedBuffer = "";
     let isStreamDone = false;
+    let handledByImageStream = false;
     let animFrameId: number | null = null;
     let lastTime = performance.now();
 
@@ -2120,13 +2794,57 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })();
     };
 
+    const completeTextReply = async (finalReplyText: string) => {
+      if (handledByImageStream) {
+        setIsSending(false);
+        return;
+      }
+      if (
+        isAuthenticated &&
+        !isGuest &&
+        looksLikeAccidentalAsciiArt(trimmedQuery, finalReplyText)
+      ) {
+        handledByImageStream = true;
+        updateMessageInChat(capturedChatId, assistantMsgId, {
+          mediaType: "image",
+          status: "generating",
+          content: "",
+          originalRequest: trimmedQuery,
+          mediaPrompt: trimmedQuery,
+          style: imageStyle,
+          aspect: imageAspect,
+        });
+        await runImageGenerationIntoMessage({
+          uid: requestUid,
+          chatId: capturedChatId,
+          msgId: assistantMsgId,
+          autoTitle,
+          isTemp,
+          projectId,
+          prompt: trimmedQuery,
+          style: imageStyle,
+          aspect: imageAspect,
+          explicitMode: true,
+          controller,
+        });
+        setIsSending(false);
+        return;
+      }
+      saveAssistantReply(finalReplyText);
+      triggerMemoryExtraction(trimmedQuery, finalReplyText);
+      triggerNotificationAndSound(finalReplyText);
+      setIsSending(false);
+    };
+
     const pumpAnimation = (now: number) => {
-      if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+      if (activeUidRef.current !== requestUid || controller.signal.aborted || handledByImageStream) {
         stopAnimation();
-        if (displayedBuffer) {
+        if (!handledByImageStream && displayedBuffer) {
           saveAssistantReply(displayedBuffer);
         }
-        setIsSending(false);
+        if (!handledByImageStream) {
+          setIsSending(false);
+        }
         return;
       }
 
@@ -2137,10 +2855,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (remainingChars === 0) {
         if (isStreamDone) {
           stopAnimation();
-          saveAssistantReply(displayedBuffer);
-          triggerMemoryExtraction(trimmedQuery, displayedBuffer);
-          triggerNotificationAndSound(displayedBuffer);
-          setIsSending(false);
+          completeTextReply(displayedBuffer);
           return;
         }
         animFrameId = requestAnimationFrame(pumpAnimation);
@@ -2204,7 +2919,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         memoryPrompt,
         userContext,
         (chunk) => {
-          if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+          if (activeUidRef.current !== requestUid || controller.signal.aborted || handledByImageStream) {
             stopAnimation();
             return;
           }
@@ -2222,23 +2937,24 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         () => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
             stopAnimation();
-            if (displayedBuffer) saveAssistantReply(displayedBuffer);
+            if (!handledByImageStream && displayedBuffer) saveAssistantReply(displayedBuffer);
             setIsSending(false);
+            return;
+          }
+          if (handledByImageStream) {
+            stopAnimation();
             return;
           }
           isStreamDone = true;
           if (prefersReducedMotion || pendingBuffer.length === 0) {
             stopAnimation();
-            saveAssistantReply(displayedBuffer);
-            triggerMemoryExtraction(trimmedQuery, displayedBuffer);
-            triggerNotificationAndSound(displayedBuffer);
-            setIsSending(false);
+            completeTextReply(displayedBuffer);
           }
         },
         async () => {
-          if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+          if (activeUidRef.current !== requestUid || controller.signal.aborted || handledByImageStream) {
             stopAnimation();
-            if (displayedBuffer) saveAssistantReply(displayedBuffer);
+            if (!handledByImageStream && displayedBuffer) saveAssistantReply(displayedBuffer);
             setIsSending(false);
             return;
           }
@@ -2257,14 +2973,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 return;
               }
               flushDisplay(reply);
-              saveAssistantReply(reply);
-              triggerMemoryExtraction(trimmedQuery, reply);
-              triggerNotificationAndSound(reply);
+              await completeTextReply(reply);
             } catch {}
           } else {
-            saveAssistantReply(displayedBuffer);
-            triggerMemoryExtraction(trimmedQuery, displayedBuffer);
-            triggerNotificationAndSound(displayedBuffer);
+            await completeTextReply(displayedBuffer);
           }
           stopAnimation();
           setIsSending(false);
@@ -2273,22 +2985,107 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         controller.signal,
         projectContext,
         relevantPastChats,
-        customStylePayload
+        customStylePayload,
+        false,
+        {
+          recentContext,
+          forceImageMode: false,
+          imageStyle,
+          imageAspect,
+          onRouterMeta: (meta) => {
+            updateMessageInChat(capturedChatId, assistantMsgId, { routerMeta: meta });
+          },
+          onImageStatus: (st) => {
+            handledByImageStream = true;
+            stopAnimation();
+            pendingBuffer = "";
+            displayedBuffer = "";
+            updateMessageInChat(capturedChatId, assistantMsgId, {
+              mediaType: "image",
+              status: "generating",
+              content: "",
+              originalRequest: trimmedQuery,
+              mediaPrompt: trimmedQuery,
+              style: st.style || imageStyle || "Auto",
+              aspect: st.aspect || imageAspect || "Auto",
+              routerMeta: st.router,
+            });
+          },
+          onImageResult: (payload) => {
+            handledByImageStream = true;
+            stopAnimation();
+            persistGeneratedImageForMessage({
+              uid: requestUid,
+              chatId: capturedChatId,
+              msgId: assistantMsgId,
+              autoTitle,
+              isTemp,
+              projectId,
+              payload,
+            }).finally(() => {
+              triggerNotificationAndSound(payload.caption || "Image created.");
+              setIsSending(false);
+            });
+          },
+          onImageBlocked: (payload) => {
+            handledByImageStream = true;
+            stopAnimation();
+            if (!isTemp && isAuthenticated && requestUid && requestUid !== "guest") {
+              saveModerationLog(requestUid, {
+                category: payload.category || "blocked",
+                cooldownTriggered: !!payload.moderation_log?.cooldown_triggered,
+              }).catch(() => {});
+            }
+            const calmMsg = payload.message || "I can't create that image. Let me know if you'd like something else.";
+            updateMessageInChat(capturedChatId, assistantMsgId, {
+              mediaType: "text",
+              mediaUrl: undefined,
+              status: "blocked",
+              content: calmMsg,
+              routerMeta: payload.router,
+            });
+            saveAssistantReply(calmMsg);
+            setIsSending(false);
+          },
+          onImageError: (payload) => {
+            handledByImageStream = true;
+            stopAnimation();
+            const errMsg = payload.message || "Could not create this image right now. Please try again.";
+            updateMessageInChat(capturedChatId, assistantMsgId, {
+              mediaType: "image",
+              mediaUrl: undefined,
+              status: "error",
+              content: errMsg,
+              errorMessage: errMsg,
+              originalRequest: trimmedQuery,
+              mediaPrompt: trimmedQuery,
+              style: imageStyle || "Auto",
+              aspect: imageAspect || "Auto",
+              routerMeta: payload.router,
+            });
+            setIsSending(false);
+          },
+        }
       );
     } catch {
       stopAnimation();
-      if (displayedBuffer) saveAssistantReply(displayedBuffer);
+      if (!handledByImageStream && displayedBuffer) saveAssistantReply(displayedBuffer);
       setIsSending(false);
+    } finally {
+      if (chatAbortControllersRef.current.get(capturedChatId) === controller) {
+        chatAbortControllersRef.current.delete(capturedChatId);
+      }
     }
   };
 
   // -----------------------------------------------------------------------
-  // sendMessage — core chat + streaming logic
+  // sendMessage — core chat + image + streaming logic
   // -----------------------------------------------------------------------
   const sendMessage = async (
     content: string,
     mode: "chat" | "image" | "video" | "voice" = "chat",
-    attachment?: AttachmentPayload | null
+    attachment?: AttachmentPayload | null,
+    imageOptions?: { style?: string; aspect?: string; seed?: number; previousPrompt?: string; isEdit?: boolean }
   ) => {
     const trimmed = content.trim();
     if ((!trimmed && !attachment) || isSending) return;
@@ -2309,13 +3106,10 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       targetChatId = createNewChat();
     }
 
-    const isImageRequest =
-      mode === "image" ||
-      /(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)|(?:photo|image|tasveer|chhavi)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
-
+    const isExplicitImageMode = mode === "image" || !!imageOptions?.isEdit;
     const isVideoRequest =
       mode === "video" ||
-      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation|cinematic)|(?:video)\s+(?:banao|karo|bana\s+do)/i.test(trimmed);
+      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)/i.test(trimmed);
 
     const { extractedName, newFact } = extractUserMemory(trimmed);
 
@@ -2359,7 +3153,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
-    const currentChat = chats.find((c) => c.id === targetChatId);
+    const currentChat = chatsRef.current.find((c) => c.id === targetChatId);
     const isTemp = isTemporaryChat || !!currentChat?._isTemporary;
     const chatProjectId = currentChat?.projectId ?? null;
     const isFirst = !currentChat || currentChat.messages.length === 0;
@@ -2391,7 +3185,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch {}
     }
 
-    // Save short message marker only to Firestore (never large file bodies)
+    // Save short message marker to Firestore (first turn initializes chat doc via queue)
     const capturedChatId = targetChatId;
     if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(userMsg.id)) {
       savedMsgIdsRef.current.add(userMsg.id);
@@ -2401,56 +3195,80 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           chatId: capturedChatId,
           title: autoTitle,
           projectId: chatProjectId,
+          isExistingChat: isFirst ? false : _CREATED_ON_SERVER_CHATS.has(capturedChatId),
           messages: [{ id: userMsg.id, role: userMsg.role, content: userMsg.content }],
         },
         setFirestoreError
       );
     }
 
-    if (isImageRequest) {
-      const imagePrompt = trimmed
-        .replace(/(?:create|generate|make|draw)\s+(?:an?\s+)?(?:image|photo|picture|wallpaper|drawing)\s+(?:of\s+)?/i, "")
-        .replace(/(?:photo|image|tasveer)\s+(?:banao|karo|bana\s+do)/i, "")
-        .trim() || trimmed;
-
-      const seed = Math.floor(Math.random() * 900000) + 100000;
-      const generatedImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=1024&height=768&nologo=true&private=true&seed=${seed}`;
-
-      setTimeout(() => {
-        const assistantMsg: MessageItem = {
+    if (isExplicitImageMode) {
+      if (isGuest) {
+        const guestMsg: MessageItem = {
           id: "ast_" + Date.now(),
           role: "assistant",
-          content: `Here is your generated image for: "${imagePrompt}"`,
-          mediaType: "image",
-          mediaUrl: generatedImageUrl,
-          mediaPrompt: imagePrompt,
+          content: "Please sign in with an account to create and save images.",
+          status: "blocked",
           created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         };
-
         setChats((prev) =>
-          prev.map((c) => {
-            if (c.id === capturedChatId) {
-              return { ...c, messages: [...c.messages, assistantMsg] };
-            }
-            return c;
-          })
+          prev.map((c) => (c.id === capturedChatId ? { ...c, messages: [...c.messages, guestMsg] } : c))
         );
         setIsSending(false);
+        setShowGuestLimitModal(true);
+        return;
+      }
 
-        if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
-          savedMsgIdsRef.current.add(assistantMsg.id);
-          backgroundSave(
-            {
-              uid: currentUid,
-              chatId: capturedChatId,
-              title: autoTitle,
-              projectId: chatProjectId,
-              messages: [{ id: assistantMsg.id, role: assistantMsg.role, content: assistantMsg.content }],
-            },
-            setFirestoreError
-          );
+      const useStyle = imageOptions?.style || imageStyle || "Auto";
+      const useAspect = imageOptions?.aspect || imageAspect || "Auto";
+      const assistantMsgId = "ast_" + Date.now();
+      const skeletonMsg: MessageItem = {
+        id: assistantMsgId,
+        role: "assistant",
+        content: "",
+        mediaType: "image",
+        status: "generating",
+        originalRequest: trimmed,
+        mediaPrompt: trimmed,
+        style: useStyle,
+        aspect: useAspect,
+        seed: imageOptions?.seed,
+        created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setChats((prev) =>
+        prev.map((c) => (c.id === capturedChatId ? { ...c, messages: [...c.messages, skeletonMsg] } : c))
+      );
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      chatAbortControllersRef.current.set(capturedChatId, controller);
+
+      try {
+        await runImageGenerationIntoMessage({
+          uid: currentUid,
+          chatId: capturedChatId,
+          msgId: assistantMsgId,
+          autoTitle,
+          isTemp,
+          projectId: chatProjectId,
+          prompt: trimmed,
+          style: useStyle,
+          aspect: useAspect,
+          seed: imageOptions?.seed,
+          previousPrompt: imageOptions?.previousPrompt,
+          isEdit: imageOptions?.isEdit,
+          explicitMode: mode === "image",
+          controller,
+        });
+      } finally {
+        if (chatAbortControllersRef.current.get(capturedChatId) === controller) {
+          chatAbortControllersRef.current.delete(capturedChatId);
         }
-      }, 1000);
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+        }
+        setIsSending(false);
+      }
       return;
     }
 
@@ -2498,8 +3316,20 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
 
+    const recentMessages = currentChat?.messages || [];
+    const recentContext = recentMessages.slice(-6).map((m) => ({
+      role: m.role,
+      content: m.content,
+      mediaType: m.mediaType,
+      originalRequest: m.originalRequest || m.mediaPrompt,
+      finalPrompt: m.finalPrompt,
+      style: m.style,
+      aspect: m.aspect,
+      seed: m.seed,
+    }));
+
     const memoryPrompt = buildMemoryPrompt(trimmed, targetChatId, extractedName, newFact, isTemp);
-    const historyPayload: ChatMessagePayload[] = (currentChat?.messages || []).map((m) => ({
+    const historyPayload: ChatMessagePayload[] = recentMessages.map((m) => ({
       role: m.role,
       content: m.fullPayloadContent || m.content,
     }));
@@ -2526,6 +3356,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       trimmedQuery: trimmed,
       historyPayload,
       memoryPrompt,
+      recentContext,
     });
   };
 
@@ -2903,6 +3734,19 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isWebSearchActive,
         setIsWebSearchActive,
         sendMessage,
+        imageStyle,
+        setImageStyle,
+        imageAspect,
+        setImageAspect,
+        loadLazyImageForMessage,
+        regenerateMessageImage,
+        deleteMessageImage,
+        reportMessageImage,
+        getFullQualityImageUrl,
+        cleanupStorage,
+        deleteErrorBanner,
+        retryFailedDelete,
+        dismissDeleteError,
         runVoiceCallTurn,
         isSending,
         guestMsgCount,

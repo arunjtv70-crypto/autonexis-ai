@@ -93,6 +93,15 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background-color: #050507;
+}
+.size-xs.tile-circle .logo-mark-img {
+  transform: scale(1.32);
+  object-fit: cover;
+}
+:root[data-theme="light"] .size-xs.tile-circle .logo-mark-tile {
+  border-color: rgba(0, 0, 0, 0.22);
 }
 .size-xs .logo-title {
   font-size: 0.85rem;
