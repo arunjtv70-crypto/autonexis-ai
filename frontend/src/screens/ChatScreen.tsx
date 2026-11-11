@@ -159,6 +159,19 @@ export const ChatScreen: React.FC = () => {
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("debug") === "1";
   const [debugTraceDismissed, setDebugTraceDismissed] = useState(false);
+  const [debugTraces, setDebugTraces] = useState<Array<{ ts: string; op: string; path: string }>>(() =>
+    isDebugMode ? getStorageDebugTraces() : []
+  );
+
+  useEffect(() => {
+    if (!isDebugMode) return;
+    setDebugTraces(getStorageDebugTraces());
+    const onTrace = () => {
+      setDebugTraces(getStorageDebugTraces());
+    };
+    window.addEventListener("autonexis:storage-trace", onTrace);
+    return () => window.removeEventListener("autonexis:storage-trace", onTrace);
+  }, [isDebugMode]);
 
   // Coordinated history-backed overlay states
   const isMobileMenuOpen = hasOverlay("drawer");
@@ -1157,8 +1170,6 @@ export const ChatScreen: React.FC = () => {
     );
   };
 
-  const debugTraces = isDebugMode ? getStorageDebugTraces() : [];
-
   return (
     <div className="chat-screen-layout">
       {/* Background Subtle Watermark */}
@@ -1376,6 +1387,25 @@ export const ChatScreen: React.FC = () => {
 
         {/* Scrollable Conversation / Home Stage + Floating Scroll-to-Latest Pill */}
         <div className="chat-scroll-stage">
+          {isDebugMode && !debugTraceDismissed && debugTraces.length > 0 && (
+            <div className="debug-storage-trace-strip" style={{ margin: "6px 14px 0" }}>
+              <span>
+                Debug storage:{" "}
+                {debugTraces
+                  .slice(-4)
+                  .map((tr) => `${tr.op}:${tr.path}`)
+                  .join(" · ")}
+              </span>
+              <button
+                type="button"
+                className="debug-trace-dismiss"
+                onClick={() => setDebugTraceDismissed(true)}
+                aria-label="Dismiss debug strip"
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <main
             className="chat-conversation-area"
             ref={chatScrollRef}
@@ -1801,25 +1831,6 @@ export const ChatScreen: React.FC = () => {
                CONVERSATION VIEW (ACTIVE CHAT WITH MESSAGES & CREATIONS)
                ============================================================== */
             <div className="chat-scroll-wrapper">
-              {isDebugMode && !debugTraceDismissed && debugTraces.length > 0 && (
-                <div className="debug-storage-trace-strip">
-                  <span>
-                    Debug storage:{" "}
-                    {debugTraces
-                      .slice(-3)
-                      .map((tr) => `${tr.op}:${tr.path}`)
-                      .join(" · ")}
-                  </span>
-                  <button
-                    type="button"
-                    className="debug-trace-dismiss"
-                    onClick={() => setDebugTraceDismissed(true)}
-                    aria-label="Dismiss debug strip"
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
               <div className="message-list">
                 {(() => {
                   const lastUserMsgId = [...activeChat.messages]
