@@ -6,7 +6,9 @@
 
 :root {
   /* Common Geometry & Typography Tokens */
-  --font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans Devanagari", Roboto, sans-serif;
+  --font-brand: "Michroma", "Inter", "Noto Sans Devanagari", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: "Inter", "Noto Sans Devanagari", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-family: var(--font-body);
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   
   --radius-sm: 8px;
@@ -79,6 +81,12 @@
   --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.25), 0 4px 16px rgba(0, 0, 0, 0.2);
   --watermark-opacity: 0.035;
   --color-scheme: dark;
+}
+
+/* Optional switch (src/config.ts BRAND_FONT_EVERYWHERE) */
+:root[data-brand-font-everywhere="true"] {
+  --font-body: var(--font-brand);
+  --font-family: var(--font-brand);
 }
 
 /* Respect user's motion preferences */

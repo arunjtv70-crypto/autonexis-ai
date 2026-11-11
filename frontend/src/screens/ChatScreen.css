@@ -14,6 +14,10 @@
   top: 50%;
   left: 55%;
   transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-brand);
   font-size: clamp(5rem, 16vw, 13rem);
   font-weight: 300;
   letter-spacing: 0.25em;
@@ -23,6 +27,19 @@
   user-select: none;
   z-index: 0;
   white-space: nowrap;
+}
+
+.chat-watermark-logo {
+  display: block;
+  width: clamp(140px, 24vw, 240px);
+  height: clamp(140px, 24vw, 240px);
+  border-radius: 50%;
+  -webkit-mask-image: radial-gradient(circle, rgba(0, 0, 0, 1) 46%, rgba(0, 0, 0, 0) 76%);
+  mask-image: radial-gradient(circle, rgba(0, 0, 0, 1) 46%, rgba(0, 0, 0, 0) 76%);
+}
+
+:root[data-theme="light"] .chat-watermark-logo {
+  filter: invert(1);
 }
 
 /* -------------------------------------------
@@ -320,6 +337,12 @@
   gap: 12px;
 }
 
+.topbar-brand-mark {
+  display: none;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 .mobile-menu-trigger {
   display: none;
   background: transparent;
@@ -379,19 +402,21 @@
 
 @media (max-width: 640px) {
   .chat-topbar {
-    padding: 0.45rem 0.6rem;
+    padding: 0.45rem 0.5rem;
   }
-  .topbar-right {
+  .topbar-left {
     gap: 4px;
     min-width: 0;
   }
+  .topbar-right {
+    gap: 2px;
+    min-width: 0;
+  }
   .guest-counter-pill {
-    font-size: 0.68rem;
-    padding: 3px 6px;
-    white-space: nowrap;
+    display: none;
   }
   .topbar-signin-pill {
-    font-size: 0.72rem;
+    font-size: 0.66rem;
     padding: 5px 8px;
     white-space: nowrap;
   }
@@ -433,8 +458,9 @@
 
 .home-greeting-section {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 1rem;
   margin-bottom: 1.5rem;
   text-align: center;
 }
@@ -447,11 +473,18 @@
 }
 
 .home-greeting-title {
-  font-family: "Georgia", "Times New Roman", serif;
-  font-size: clamp(1.6rem, 3.5vw, 2.1rem);
+  font-family: var(--font-brand);
+  font-size: clamp(1.45rem, 3.2vw, 1.95rem);
   font-weight: 400;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: 0.04em;
+}
+
+.assistant-avatar-wrap {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  padding-top: 2px;
 }
 
 /* Card-style Input Box */
@@ -1960,6 +1993,9 @@
   }
   .mobile-menu-trigger {
     display: block;
+  }
+  .topbar-brand-mark {
+    display: inline-flex;
   }
   .chat-home-container {
     padding: 1rem 0.75rem 2rem;

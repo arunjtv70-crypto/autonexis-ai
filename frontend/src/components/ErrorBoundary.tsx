@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Logo } from "./Logo";
 
 interface Props {
   children: ReactNode;
@@ -57,41 +58,25 @@ export class ErrorBoundary extends Component<Props, State> {
             justifyContent: "center",
             padding: "24px",
             boxSizing: "border-box",
-            backgroundColor: "var(--bg-app, #0C0C0E)",
+            backgroundColor: "var(--bg, #0C0C0E)",
             color: "var(--text-primary, #ffffff)",
-            fontFamily: "Inter, -apple-system, BlinkMacSystemFont, sans-serif",
+            fontFamily: "var(--font-body, sans-serif)",
           }}
         >
           <div
             style={{
               maxWidth: "420px",
               width: "100%",
-              backgroundColor: "var(--bg-card, #141416)",
-              border: "1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))",
+              backgroundColor: "var(--surface, #141416)",
+              border: "1px solid var(--border, rgba(255, 255, 255, 0.08))",
               borderRadius: "16px",
               padding: "36px 28px",
               textAlign: "center",
               boxShadow: "0 20px 40px rgba(0, 0, 0, 0.4)",
             }}
           >
-            <div
-              style={{
-                width: "56px",
-                height: "56px",
-                margin: "0 auto 20px",
-                borderRadius: "50%",
-                overflow: "hidden",
-                border: "1px solid var(--border-subtle, rgba(255, 255, 255, 0.12))",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <img
-                src="/logo_circle.png?v=20261107"
-                alt="AUTONEXIS"
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: "20px" }}>
+              <Logo variant="mark" size="md" tile="circle" />
             </div>
 
             <h1

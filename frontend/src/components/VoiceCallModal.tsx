@@ -1063,7 +1063,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({ isOpen, onClose 
           <div className="voice-orb-ring inner" aria-hidden="true" />
           <div className="voice-orb-core">
             <img
-              src="/logo_circle.png?v=20261107"
+              src="/brand/logo-mark.png"
               alt="AUTONEXIS"
               className="voice-orb-logo"
             />

@@ -96,7 +96,7 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
 
         // Load and stamp AUTONEXIS logo at bottom-right corner
         const logoImg = new Image();
-        logoImg.src = "/logo_circle.png?v=20261107";
+        logoImg.src = "/brand/logo-mark.png";
         await new Promise((res) => {
           logoImg.onload = res;
           logoImg.onerror = res;
@@ -190,7 +190,7 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
         {/* AUTONEXIS Official Watermark Pill covering bottom-right */}
         <div className="creation-watermark-overlay" title="AUTONEXIS Assistant">
           <img
-            src="/logo_circle.png?v=20261107"
+            src="/brand/logo-mark.png"
             alt="AUTONEXIS"
             className="watermark-logo-img"
           />
@@ -218,7 +218,7 @@ export const ImageCreationCard: React.FC<ImageCardProps> = ({
             <img src={finalImageUrl} alt={prompt} className="lightbox-img" />
             <div className="creation-watermark-overlay lightbox-watermark">
               <img
-                src="/logo_circle.png?v=20261107"
+                src="/brand/logo-mark.png"
                 alt="AUTONEXIS"
                 className="watermark-logo-img"
               />

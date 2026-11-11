@@ -7,7 +7,15 @@ import { AuthProvider } from "./state/auth";
 import { ChatsProvider } from "./state/chats";
 import { PwaProvider } from "./state/pwa";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { BRAND_FONT_EVERYWHERE } from "./config";
 import App from "./App";
+
+if (typeof document !== "undefined") {
+  document.documentElement.setAttribute(
+    "data-brand-font-everywhere",
+    BRAND_FONT_EVERYWHERE ? "true" : "false"
+  );
+}
 
 // Register Service Worker for offline PWA support and install prompt
 if (typeof window !== "undefined" && "serviceWorker" in navigator && import.meta.env.PROD) {

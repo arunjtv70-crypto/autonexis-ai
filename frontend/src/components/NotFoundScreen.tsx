@@ -36,7 +36,7 @@ export const NotFoundScreen: React.FC = () => {
           boxShadow: "var(--shadow-subtle)",
         }}
       >
-        <Logo size="md" showSubtitle={false} />
+        <Logo variant="full" size="md" layout="stacked" showSubtitle={false} />
         <h1
           style={{
             fontSize: "1.35rem",

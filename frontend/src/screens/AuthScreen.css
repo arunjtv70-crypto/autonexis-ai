@@ -14,9 +14,10 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  font-size: clamp(5rem, 18vw, 12rem);
-  font-weight: 300;
-  letter-spacing: 0.25em;
+  font-family: var(--font-brand);
+  font-size: clamp(4.2rem, 15vw, 10rem);
+  font-weight: 400;
+  letter-spacing: 0.34em;
   color: var(--text-primary);
   opacity: var(--watermark-opacity);
   pointer-events: none;

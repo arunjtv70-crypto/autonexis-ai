@@ -1,7 +1,25 @@
-// AUTONEXIS Service Worker - Hardened Version
-const CACHE_NAME = 'autonexis-v20261110-guard';
+// AUTONEXIS Service Worker - Branded Offline & Fresh Shell Guard
+const CACHE_NAME = 'autonexis-v20261111-brand';
+
+const PRECACHE_URLS = [
+  '/',
+  '/index.html',
+  '/manifest.webmanifest',
+  '/brand/logo-mark.png',
+  '/brand/logo-full.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  '/apple-touch-icon.png',
+  '/fonts/michroma-latin-400.woff2',
+  '/fonts/inter-latin.woff2',
+  '/fonts/noto-sans-devanagari-dev.woff2',
+  '/fonts/noto-sans-devanagari-latin.woff2'
+];
 
 self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS)).catch(() => {})
+  );
   self.skipWaiting();
 });
 
@@ -16,8 +34,7 @@ self.addEventListener('activate', (event) => {
           return Promise.resolve();
         })
       );
-    })
-    .then(() => self.clients.claim())
+    }).then(() => self.clients.claim())
   );
 });
 
@@ -35,14 +52,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 2. Navigation requests & index.html: Strict Network-First
-  // Ensures user always receives latest HTML containing up-to-date asset chunk hashes
+  // 2. Navigation requests & index.html: Network-First with offline cache fallback
   const isNavigation = request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('/index.html');
   if (isNavigation) {
     event.respondWith(
       fetch(request)
         .then((networkResponse) => {
-          // Never cache failed responses (status >= 400) or opaque errors
           if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'opaque') {
             return networkResponse;
           }
@@ -53,24 +68,19 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         })
         .catch(async () => {
-          // Fallback to cached index.html only when strictly offline
           const cachedResponse = await caches.match(request);
-          if (cachedResponse) {
-            return cachedResponse;
-          }
+          if (cachedResponse) return cachedResponse;
           return caches.match('/index.html');
         })
     );
     return;
   }
 
-  // 3. Static assets (/assets/, fonts, icons, images)
-  // Stale-while-revalidate / Cache-first with error protection
+  // 3. Fonts, Brand Images, Icons & Built Assets: Cache-First + background refresh
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
       const fetchPromise = fetch(request)
         .then((networkResponse) => {
-          // Only cache successful 200 responses
           if (networkResponse && networkResponse.status === 200 && networkResponse.type !== 'opaque') {
             const responseToCache = networkResponse.clone();
             caches.open(CACHE_NAME).then((cache) => {

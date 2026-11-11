@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
+import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "../state/theme";
 import { useAuth } from "../state/auth";
 import { useChats } from "../state/chats";
@@ -544,6 +545,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }
           }}
         >
+          <div className="settings-sidebar-brand">
+            <Logo variant="mark" size="xs" />
+            <span className="settings-sidebar-brand-title">{t("settingsTitle")}</span>
+          </div>
           <div className="settings-list-mobile-topbar">
             <button
               type="button"
@@ -555,7 +560,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
               <span>{t("back")}</span>
             </button>
-            <span className="settings-list-mobile-title">{t("settingsTitle")}</span>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+              <Logo variant="mark" size="xs" />
+              <span className="settings-list-mobile-title">{t("settingsTitle")}</span>
+            </div>
           </div>
 
           <div className="settings-search-box">
@@ -2092,6 +2100,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === "about" && subView === "main" && (
             <div className="settings-tab-pane">
               <div className="settings-about-box">
+                <div style={{ marginBottom: "8px" }}>
+                  <Logo variant="full" size="md" layout="inline" showSubtitle={true} />
+                </div>
                 <div className="settings-about-line">
                   <span className="settings-about-name">AUTONEXIS Assistant</span>
                   <span className="settings-about-badge">{APP_VERSION}</span>

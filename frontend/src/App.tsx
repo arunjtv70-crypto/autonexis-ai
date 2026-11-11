@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useAuth } from "./state/auth";
 import { useAppNavigation } from "./state/navigation";
 import { AuthScreen } from "./screens/AuthScreen";
@@ -6,12 +6,59 @@ import { ChatScreen } from "./screens/ChatScreen";
 import { Skeleton } from "./components/Skeleton";
 import { NotFoundScreen } from "./components/NotFoundScreen";
 
+const SPLASH_SESSION_KEY = "autonexis_splash_done";
+
 export const AppContent: React.FC = () => {
   const { isAuthScreenVisible, isLoading, user, isGuest } = useAuth();
   const { route } = useAppNavigation();
 
-  // Auth state resolution gate: do not render any chat until onAuthStateChanged has resolved
+  // Presentational cold-start splash guard (does NOT affect or delay auth logic itself)
+  const [minSplashElapsed, setMinSplashElapsed] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem(SPLASH_SESSION_KEY) === "1";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    if (minSplashElapsed) return;
+    const t = window.setTimeout(() => setMinSplashElapsed(true), 620);
+    return () => window.clearTimeout(t);
+  }, [minSplashElapsed]);
+
+  const showColdSplashOverlay =
+    typeof window !== "undefined" &&
+    (() => {
+      try {
+        return sessionStorage.getItem(SPLASH_SESSION_KEY) !== "1";
+      } catch {
+        return false;
+      }
+    })();
+
+  // Hide the inline HTML Stage 1 splash smoothly once auth resolves and min visual floor completes
+  useEffect(() => {
+    if (isLoading || !minSplashElapsed) return;
+    try {
+      sessionStorage.setItem(SPLASH_SESSION_KEY, "1");
+    } catch {}
+    const splashEl = document.getElementById("autonexis-splash");
+    if (splashEl && !splashEl.classList.contains("is-hidden")) {
+      splashEl.classList.add("is-fading-out");
+      window.setTimeout(() => {
+        splashEl.classList.add("is-hidden");
+        splashEl.style.display = "none";
+      }, 320);
+    }
+    document.documentElement.classList.remove("splash-booting");
+  }, [isLoading, minSplashElapsed]);
+
+  // Auth state resolution gate: kept identical in logic
   if (isLoading) {
+    if (showColdSplashOverlay) {
+      return null;
+    }
     return (
       <div
         style={{
@@ -19,7 +66,7 @@ export const AppContent: React.FC = () => {
           flexDirection: "column",
           width: "100vw",
           height: "100vh",
-          backgroundColor: "var(--bg-primary, #0f1117)",
+          backgroundColor: "var(--bg)",
           padding: "24px",
           boxSizing: "border-box",
           gap: "16px",

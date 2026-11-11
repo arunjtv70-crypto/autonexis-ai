@@ -93,7 +93,7 @@ export const AuthScreen: React.FC = () => {
       <div className="auth-card">
         {/* Brand Header */}
         <div className="auth-header">
-          <Logo size="lg" showSubtitle={true} />
+          <Logo variant="full" size="lg" layout="stacked" showSubtitle={true} />
           <p className="auth-subtext">
             Thoughtful, quiet and intelligent AI assistant
           </p>

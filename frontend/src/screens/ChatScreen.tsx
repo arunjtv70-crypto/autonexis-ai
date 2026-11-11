@@ -781,7 +781,7 @@ export const ChatScreen: React.FC = () => {
       {/* Brand Header */}
       <div className="sidebar-brand-header">
         <div className="sidebar-brand-left">
-          <Logo size="sm" showSubtitle={false} />
+          <Logo variant="full" size="sm" showSubtitle={false} />
         </div>
       </div>
 
@@ -1043,7 +1043,7 @@ export const ChatScreen: React.FC = () => {
           <span className="user-profile-left">
             <span className="user-avatar-circle">
               <img
-                src={firebaseUser?.photoURL || "/logo_circle.png?v=20261107"}
+                src={firebaseUser?.photoURL || "/brand/logo-mark.png"}
                 alt="User"
                 className="user-avatar-img"
               />
@@ -1063,7 +1063,7 @@ export const ChatScreen: React.FC = () => {
     <div className="chat-screen-layout">
       {/* Background Subtle Watermark */}
       <div className="chat-watermark" aria-hidden="true">
-        AUTONEXIS
+        <Logo variant="mark" size="lg" tile="none" className="chat-watermark-logo" />
       </div>
 
       {/* Desktop Persistent Sidebar */}
@@ -1099,6 +1099,9 @@ export const ChatScreen: React.FC = () => {
             >
               <IconMenu size={20} />
             </button>
+            <div className="topbar-brand-mark">
+              <Logo variant="mark" size="xs" />
+            </div>
           </div>
 
           <div className="topbar-center" />
@@ -1282,13 +1285,9 @@ export const ChatScreen: React.FC = () => {
                INSPIRATION-ALIGNED HOME SCREEN (AUTONEXIS AESTHETIC)
                ============================================================== */
             <div className="chat-home-container">
-              {/* Star Greeting */}
+              {/* Brand Mark + Greeting */}
               <div className="home-greeting-section">
-                <img
-                  src="/logo_icon.png?v=20261107"
-                  alt="Orbital Star"
-                  className="home-orbital-icon"
-                />
+                <Logo variant="full" size="md" layout="stacked" showSubtitle={false} />
                 <h1 className="home-greeting-title">
                   {t("backAtIt")}, {userName}
                 </h1>
@@ -1687,12 +1686,8 @@ export const ChatScreen: React.FC = () => {
                         className={`message-row ${isUser ? "user-row" : "assistant-row"}`}
                       >
                         {!isUser && (
-                          <div className="assistant-avatar" aria-hidden="true">
-                            <img
-                              src="/logo_icon.png?v=20261107"
-                              alt="AUTONEXIS"
-                              className="assistant-avatar-img"
-                            />
+                          <div className="assistant-avatar-wrap" aria-hidden="true">
+                            <Logo variant="mark" size="xs" tile="circle" />
                           </div>
                         )}
 
@@ -1953,12 +1948,8 @@ export const ChatScreen: React.FC = () => {
                     activeChat.messages[activeChat.messages.length - 1].role !== "assistant" ||
                     !activeChat.messages[activeChat.messages.length - 1].content) && (
                     <div className="message-row assistant-row">
-                      <div className="assistant-avatar">
-                        <img
-                          src="/logo_icon.png?v=20261107"
-                          alt="AUTONEXIS"
-                          className="assistant-avatar-img"
-                        />
+                      <div className="assistant-avatar-wrap" aria-hidden="true">
+                        <Logo variant="mark" size="xs" tile="circle" />
                       </div>
                       <div className="message-bubble-box assistant-box">
                         <div className="typing-dots">
@@ -2361,7 +2352,7 @@ export const ChatScreen: React.FC = () => {
         >
           <div className="guest-limit-modal" onClick={(e) => e.stopPropagation()}>
             <div className="guest-modal-icon">
-              <img src="/logo_icon.png?v=20261107" alt="AUTONEXIS" style={{ width: 44, height: 44 }} />
+              <Logo variant="mark" size="md" tile="circle" />
             </div>
             <h3 className="guest-modal-title">
               {guestModalReason === "voiceCall" ? "Log in to use voice calls" : "Log in to continue"}
