@@ -13,6 +13,89 @@ export interface ChatMessagePayload {
   content: MessageContent;
 }
 
+export interface VisionDebugInfo {
+  payload_kb: number;
+  image_count: number;
+  route: string;
+  fallback_used: boolean;
+  attempts: number;
+  latency_ms: number;
+  status: number | string;
+  error: string | null;
+}
+
+export type VisionStage = "preparing" | "reading" | "checking" | "writing";
+
+export const MAX_CHAT_REQUEST_BYTES = Math.floor(2.85 * 1024 * 1024);
+
+function isVisionDebugEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return new URLSearchParams(window.location.search).get("debug") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function pruneClientHistoricalImages(messages: ChatMessagePayload[]): ChatMessagePayload[] {
+  if (!messages.length) return messages;
+  const lastIdx = messages.length - 1;
+  return messages.map((m, idx) => {
+    if (idx === lastIdx || !Array.isArray(m.content)) return m;
+    let hadImg = false;
+    const kept: MultimodalPart[] = [];
+    for (const p of m.content) {
+      if (p.type === "image_url") {
+        hadImg = true;
+      } else {
+        kept.push(p);
+      }
+    }
+    if (hadImg) {
+      kept.push({ type: "text", text: "[image sent earlier]" });
+    }
+    return { ...m, content: kept };
+  });
+}
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+export function buildBoundedChatBody(rawBody: Record<string, any>): { json: string; bytes: number } {
+  const sanitizedMessages = pruneClientHistoricalImages(rawBody.messages || []);
+  let candidate: Record<string, any> = { ...rawBody, messages: sanitizedMessages };
+  let json = JSON.stringify(candidate);
+  let bytes = utf8ByteLength(json);
+
+  if (bytes > MAX_CHAT_REQUEST_BYTES && candidate.relevant_past_chats) {
+    candidate = { ...candidate, relevant_past_chats: undefined };
+    json = JSON.stringify(candidate);
+    bytes = utf8ByteLength(json);
+  }
+
+  if (bytes > MAX_CHAT_REQUEST_BYTES && candidate.project_context) {
+    candidate = { ...candidate, project_context: undefined };
+    json = JSON.stringify(candidate);
+    bytes = utf8ByteLength(json);
+  }
+
+  // Progressively trim older turns while keeping the latest message intact
+  while (bytes > MAX_CHAT_REQUEST_BYTES && Array.isArray(candidate.messages) && candidate.messages.length > 1) {
+    candidate = { ...candidate, messages: candidate.messages.slice(1) };
+    json = JSON.stringify(candidate);
+    bytes = utf8ByteLength(json);
+  }
+
+  if (bytes > Math.floor(2.98 * 1024 * 1024)) {
+    throw new Error(
+      `Attached image payload (${(bytes / (1024 * 1024)).toFixed(2)} MB) exceeds the 3 MB request limit. Try fewer images or a smaller crop.`
+    );
+  }
+
+  return { json, bytes };
+}
+
 /**
  * Returns authorization headers with the fresh Firebase ID token,
  * or the X-Guest header when in guest mode.
@@ -62,21 +145,23 @@ export async function postChatMessage(
   customStyle?: any,
   voice = false
 ): Promise<string> {
-  const url = `${API_BASE_URL}/chat`;
+  const url = `${API_BASE_URL}/chat${isVisionDebugEnabled() ? "?debug=1" : ""}`;
   try {
     const headers = await getAuthHeaders(isGuest);
+    const { json } = buildBoundedChatBody({
+      messages,
+      user_memory: userMemory || undefined,
+      user_context: userContext || undefined,
+      project_context: projectContext || undefined,
+      relevant_past_chats: relevantPastChats || undefined,
+      custom_style: customStyle || undefined,
+      voice: voice || undefined,
+      debug: isVisionDebugEnabled() || undefined,
+    });
     const res = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        messages,
-        user_memory: userMemory || undefined,
-        user_context: userContext || undefined,
-        project_context: projectContext || undefined,
-        relevant_past_chats: relevantPastChats || undefined,
-        custom_style: customStyle || undefined,
-        voice: voice || undefined,
-      }),
+      body: json,
     });
 
     if (res.status === 401) {
@@ -85,13 +170,21 @@ export async function postChatMessage(
     }
 
     if (!res.ok) {
-      throw new Error(`Server returned ${res.status}`);
+      let detail = `Server returned ${res.status}`;
+      try {
+        const errJson = await res.json();
+        if (errJson?.detail) detail = String(errJson.detail);
+      } catch {}
+      throw new Error(detail);
     }
 
     const data = await res.json();
     return data.reply || "I am here to help. What would you like to explore next?";
-  } catch (err) {
+  } catch (err: any) {
     console.error("[AUTONEXIS API ERROR]", err);
+    if (err?.message && !/failed to fetch/i.test(err.message)) {
+      return err.message;
+    }
     return "I am currently unable to reach the service. Please check your connection or try again in a moment.";
   }
 }
@@ -130,6 +223,8 @@ export interface StreamChatOptions {
   onImageResult?: (payload: ImageGenerationResultPayload) => void;
   onImageBlocked?: (payload: { message: string; category?: string; moderation_log?: any; router?: ImageRouterMeta }) => void;
   onImageError?: (payload: { message: string; rate_limited?: boolean; retry_after?: number; router?: ImageRouterMeta }) => void;
+  onVisionStage?: (stage: VisionStage) => void;
+  onVisionDebug?: (debug: VisionDebugInfo) => void;
 }
 
 export async function streamChatMessage(
@@ -147,27 +242,30 @@ export async function streamChatMessage(
   voice = false,
   options?: StreamChatOptions
 ): Promise<void> {
-  const url = `${API_BASE_URL}/chat/stream`;
+  const debugOn = isVisionDebugEnabled();
+  const url = `${API_BASE_URL}/chat/stream${debugOn ? "?debug=1" : ""}`;
   try {
     const headers = await getAuthHeaders(isGuest);
+    const { json } = buildBoundedChatBody({
+      messages,
+      user_memory: userMemory || undefined,
+      user_context: userContext || undefined,
+      project_context: projectContext || undefined,
+      relevant_past_chats: relevantPastChats || undefined,
+      custom_style: customStyle || undefined,
+      voice: voice || undefined,
+      recent_context: options?.recentContext || undefined,
+      force_image_mode: options?.forceImageMode || undefined,
+      image_style: options?.imageStyle || undefined,
+      image_aspect: options?.imageAspect || undefined,
+      image_seed: options?.imageSeed ?? undefined,
+      debug: debugOn || undefined,
+    });
     const res = await fetch(url, {
       method: "POST",
       headers,
       signal,
-      body: JSON.stringify({
-        messages,
-        user_memory: userMemory || undefined,
-        user_context: userContext || undefined,
-        project_context: projectContext || undefined,
-        relevant_past_chats: relevantPastChats || undefined,
-        custom_style: customStyle || undefined,
-        voice: voice || undefined,
-        recent_context: options?.recentContext || undefined,
-        force_image_mode: options?.forceImageMode || undefined,
-        image_style: options?.imageStyle || undefined,
-        image_aspect: options?.imageAspect || undefined,
-        image_seed: options?.imageSeed ?? undefined,
-      }),
+      body: json,
     });
 
     const routerHdr = res.headers.get("X-Autonexis-Router");
@@ -184,7 +282,17 @@ export async function streamChatMessage(
     }
 
     if (res.status === 429) {
-      onError(Object.assign(new Error("Voice is busy, please try again shortly"), { rateLimited: true }));
+      onError(Object.assign(new Error(voice ? "Voice is busy, please try again shortly" : "Too many requests right now. Please wait a few seconds and try again."), { rateLimited: true }));
+      return;
+    }
+
+    if (res.status === 413 || res.status === 400 || res.status === 403) {
+      let detail = `Server returned HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        if (errJson?.detail) detail = String(errJson.detail);
+      } catch {}
+      onError(new Error(detail));
       return;
     }
 
@@ -235,6 +343,10 @@ export async function streamChatMessage(
               const parsed = JSON.parse(dataStr);
               if (parsed.type === "router_meta" && parsed.router) {
                 options?.onRouterMeta?.(parsed.router);
+              } else if (parsed.type === "vision_stage" && parsed.stage) {
+                options?.onVisionStage?.(parsed.stage as VisionStage);
+              } else if (parsed.type === "vision_debug" && parsed.debug) {
+                options?.onVisionDebug?.(parsed.debug as VisionDebugInfo);
               } else if (parsed.type === "image_status") {
                 options?.onImageStatus?.(parsed);
               } else if (parsed.type === "image_result") {

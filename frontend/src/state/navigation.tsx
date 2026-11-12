@@ -8,7 +8,9 @@ export type AppOverlayId =
   | "guestModal"
   | "iosInstall"
   | "lightbox"
-  | "voiceCall";
+  | "voiceCall"
+  | "imageEditor"
+  | "cameraCapture";
 
 const VALID_SETTINGS_SECTIONS = new Set<SettingsTabId>([
   "account",

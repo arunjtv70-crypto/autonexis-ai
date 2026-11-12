@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import re
+import time
 from typing import AsyncGenerator, List, Dict, Any, Optional, Union
 import httpx
 from config import settings
@@ -31,7 +32,101 @@ logger = logging.getLogger("autonexis.llm")
 logging.basicConfig(level=logging.INFO)
 
 FRIENDLY_ERROR_MESSAGE = "I am currently having trouble connecting. Please try again in a moment."
-VISION_ERROR_MESSAGE = "I couldn't read this image. Please try a smaller or clearer one."
+
+_SENSITIVE_VENDOR_TOKENS_RE = re.compile(
+    r"\b(?:groq|openai|anthropic|claude|qwen|llama|meta-llama|gpt-oss|gemini|mistral|together|openrouter|perplexity|deepseek|fireworks)\b(?:[^\s,;)]*)?",
+    re.I,
+)
+_URL_RE = re.compile(r"https?://\S+", re.I)
+
+
+def _sanitize_error_detail(raw_text: str) -> str:
+    """Strip provider/model identifiers and URLs before surfacing an error reason to UI."""
+    if not raw_text:
+        return ""
+    cleaned = _URL_RE.sub("[endpoint]", str(raw_text))
+    cleaned = _SENSITIVE_VENDOR_TOKENS_RE.sub("the vision engine", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:220]
+
+
+def _extract_upstream_error_detail(raw_body: str) -> str:
+    if not raw_body:
+        return ""
+    try:
+        parsed = json.loads(raw_body)
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            msg = str(err.get("message") or "").strip()
+            if msg:
+                return _sanitize_error_detail(msg)
+        elif isinstance(err, str):
+            return _sanitize_error_detail(err)
+        detail = parsed.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return _sanitize_error_detail(detail)
+    except Exception:
+        pass
+    return _sanitize_error_detail(raw_body)
+
+
+def _format_safe_upstream_error(
+    status_code: Optional[int],
+    raw_body: str = "",
+    is_vision: bool = False,
+    exc: Optional[Exception] = None,
+) -> str:
+    """Builds a real, honest error message without exposing provider or model names."""
+    if exc is not None:
+        exc_name = type(exc).__name__
+        if "Timeout" in exc_name:
+            return (
+                "Analyzing the image took too long and timed out. Try cropping the area you want or attaching fewer images."
+                if is_vision
+                else "The request timed out. Please try again."
+            )
+        safe_ex = _sanitize_error_detail(str(exc))
+        if safe_ex:
+            return f"{'Image analysis' if is_vision else 'Chat request'} failed ({exc_name}: {safe_ex})."
+        return f"{'Image analysis' if is_vision else 'Chat request'} failed ({exc_name})."
+
+    detail = _extract_upstream_error_detail(raw_body)
+    if status_code == 413:
+        return "The attached image request is too large to process (HTTP 413). Try cropping or attaching fewer images."
+    if status_code == 429:
+        return "Too many requests right now (rate limit HTTP 429). Please wait a few seconds and try again."
+    if status_code in (401, 403):
+        return f"{'Image analysis' if is_vision else 'Request'} could not authenticate upstream (HTTP {status_code})."
+    if status_code in (408, 504):
+        return f"{'Image analysis' if is_vision else 'Request'} timed out upstream (HTTP {status_code})."
+    if status_code == 400:
+        if detail:
+            return f"{'Image request' if is_vision else 'Request'} was rejected (HTTP 400): {detail}"
+        return f"{'The image format or dimensions could not be processed (HTTP 400).' if is_vision else 'Request was rejected (HTTP 400).'}"
+    if status_code and status_code >= 500:
+        return f"The {'vision' if is_vision else 'chat'} service returned a temporary server error (HTTP {status_code}). Please try again."
+    if status_code:
+        suffix = f": {detail}" if detail else "."
+        return f"{'Image analysis' if is_vision else 'Request'} failed with status {status_code}{suffix}"
+    return FRIENDLY_ERROR_MESSAGE
+
+
+def _count_images_in_messages(messages: List[Dict[str, Any]]) -> int:
+    count = 0
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    count += 1
+    return count
+
+
+def _estimate_payload_bytes(payload: Dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return 0
 
 GENERATE_IMAGE_TOOL_DEFINITION = {
     "type": "function",
@@ -143,19 +238,23 @@ def has_image_content(messages: List[Dict[str, Any]]) -> bool:
                     return True
     return False
 
-def prune_historical_images(messages: List[Dict[str, Any]], keep_latest: int = 2) -> List[Dict[str, Any]]:
+def prune_historical_images(messages: List[Dict[str, Any]], keep_latest: int = 1) -> List[Dict[str, Any]]:
     """
-    Keeps full image data for only the latest N messages containing images.
-    Replaces older image attachments with '[image sent earlier]' to conserve tokens
-    and prevent request payload bloat.
+    Keeps full image data ONLY from the latest message (or last N image messages if keep_latest > 1),
+    always ensuring older image payloads are replaced with '[image sent earlier]'.
+    When keep_latest == 1 (default), if the final message has no images, earlier images are also pruned
+    so only images sent in the latest message are forwarded.
     """
-    img_indices = []
-    for idx, msg in enumerate(messages):
-        content = msg.get("content")
-        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
-            img_indices.append(idx)
-
-    indices_to_keep = set(img_indices[-keep_latest:]) if len(img_indices) > keep_latest else set(img_indices)
+    if keep_latest <= 1 and messages:
+        last_idx = len(messages) - 1
+        indices_to_keep = {last_idx}
+    else:
+        img_indices = []
+        for idx, msg in enumerate(messages):
+            content = msg.get("content")
+            if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+                img_indices.append(idx)
+        indices_to_keep = set(img_indices[-keep_latest:]) if len(img_indices) > keep_latest else set(img_indices)
 
     pruned = []
     for idx, msg in enumerate(messages):
@@ -247,15 +346,39 @@ class LLMClient:
         self.base_url = settings.llm_base_url.rstrip("/")
         self.system_prompt = settings.system_prompt
 
+    def _get_vision_models(self) -> List[str]:
+        """Ordered deduplicated list of vision models for primary + fallback chain."""
+        candidates: List[str] = []
+        env_primary = (os.environ.get("LLM_VISION_MODEL") or "").strip()
+        if env_primary:
+            candidates.append(env_primary)
+        if self.vision_model:
+            candidates.append(self.vision_model.strip())
+        env_fallbacks = (os.environ.get("LLM_VISION_FALLBACK_MODELS") or "").strip()
+        if env_fallbacks:
+            for item in env_fallbacks.split(","):
+                m = item.strip()
+                if m:
+                    candidates.append(m)
+        if not candidates:
+            candidates.append("qwen/qwen3.8-27b")
+        seen = set()
+        ordered: List[str] = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                ordered.append(m)
+        return ordered
+
     def _get_active_model(self, messages: List[Dict[str, Any]]) -> str:
         """
         Dynamically picks:
-        - Vision model if messages contain an image.
+        - Vision model if latest message contains an image.
         - Think/Reasoning model if messages contain a mathematical/quantitative inquiry.
         - Default text model otherwise.
         """
         if has_image_content(messages):
-            return os.environ.get("LLM_VISION_MODEL") or self.vision_model or "qwen/qwen3.8-27b"
+            return self._get_vision_models()[0]
         if is_math_request(messages):
             return os.environ.get("LLM_MODEL_THINK") or self.model_think or "openai/gpt-oss-120b"
         return os.environ.get("LLM_MODEL") or self.model
@@ -336,8 +459,8 @@ class LLMClient:
         # Trim history if excessively long while keeping recent context
         trimmed_messages = messages[-max_history:] if len(messages) > max_history else messages
 
-        # Prune older images to conserve token limits (only keep latest 2 messages with images)
-        trimmed_messages = prune_historical_images(trimmed_messages, keep_latest=2)
+        # Prune older images strictly: keep images ONLY from the latest message
+        trimmed_messages = prune_historical_images(trimmed_messages, keep_latest=1)
 
         user_and_assistant = []
         last_user_text = ""
@@ -452,11 +575,14 @@ class LLMClient:
         image_style: Optional[str] = None,
         image_aspect: Optional[str] = None,
         image_seed: Optional[int] = None,
+        debug: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         Streams completion tokens as Server-Sent Events (SSE) data chunks.
         Runs deterministic image router first when provided; otherwise runs chat LLM.
         """
+        t_start = time.monotonic()
+        messages = prune_historical_images(messages, keep_latest=1)
         last_user_text = get_last_user_text(messages)
 
         if router_result:
@@ -538,19 +664,21 @@ class LLMClient:
         }
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
+        vision_image_count = _count_images_in_messages(messages) if is_vision else 0
         is_math = is_math_request(messages)
         fallback_error_msg = (
             "Voice is busy, please try again shortly"
             if voice
-            else (VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE)
+            else FRIENDLY_ERROR_MESSAGE
         )
 
         has_tavily = bool(_get_tavily_key())
         web_search_requested = bool(user_context and user_context.get("web_search"))
         use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
         is_borderline_image = bool(router_result and router_result.get("intent") == "chat" and float(router_result.get("confidence", 1.0)) <= 0.65)
-        use_image_tool_backup = (not voice and not is_guest and bool(uid) and is_borderline_image)
-        needs_tool_loop = is_math or use_web_tool or use_image_tool_backup
+        use_image_tool_backup = (not voice and not is_guest and bool(uid) and is_borderline_image and not is_vision)
+        # Keep multimodal image inputs on the dedicated vision route (fallback chain + self-check + stage progress)
+        needs_tool_loop = (not is_vision) and (is_math or use_web_tool or use_image_tool_backup)
 
         voice_max_tokens = 340 if _CODE_OR_TABLE_RE.search(last_user_text or "") else 250
 
@@ -721,118 +849,188 @@ class LLMClient:
         # Optional Think Mode Self-Check for Images/Complex Reasoning
         enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
         run_self_check = enable_self_check and not is_guest and not voice and is_vision
+        models_to_try = self._get_vision_models() if is_vision else [active_model]
+        payload_bytes = _estimate_payload_bytes({"messages": conversation})
 
         if run_self_check:
-            # First produce response, then run verification check
-            payload = {
-                "model": active_model,
-                "messages": conversation,
-                "stream": False,
-                "temperature": 0.2,
-                "max_tokens": max_tokens,
-            }
-            try:
-                timeout = httpx.Timeout(connect=15.0, read=70.0, write=15.0, pool=15.0)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    res = await client.post(endpoint, json=payload, headers=headers)
-                    if res.status_code != 200:
-                        error_body = res.text
-                        logger.error(f"[AUTONEXIS LLM VISION ERROR] Status {res.status_code}: {error_body}")
-                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
+            yield f"data: {json.dumps({'type': 'vision_stage', 'stage': 'reading'}, ensure_ascii=False)}\n\n"
+            last_status: Optional[int] = None
+            last_body = ""
+            last_exc: Optional[Exception] = None
 
-                    raw_ans = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-                    
-                    # Run quick self-check verification
-                    check_convo = list(conversation) + [
-                        {"role": "assistant", "content": raw_ans},
-                        {"role": "user", "content": "Carefully double-check your answer above. Check for any arithmetic mistakes, missed constraints, or visual inaccuracies. If you find any error, provide the corrected answer. If it is 100% correct, reply 'VERIFIED_CORRECT'."}
-                    ]
-                    check_payload = {
-                        "model": active_model,
-                        "messages": check_convo,
+            timeout = httpx.Timeout(connect=15.0, read=70.0, write=15.0, pool=15.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for attempt_idx, candidate_model in enumerate(models_to_try):
+                    payload = {
+                        "model": candidate_model,
+                        "messages": conversation,
                         "stream": False,
-                        "temperature": 0.1,
+                        "temperature": 0.2,
                         "max_tokens": max_tokens,
                     }
-                    final_ans = raw_ans
                     try:
-                        check_res = await client.post(endpoint, json=check_payload, headers=headers)
-                        if check_res.status_code == 200:
-                            check_text = check_res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                            if check_text and "VERIFIED_CORRECT" not in check_text and len(check_text) > 20:
-                                final_ans = check_text
-                    except Exception as chk_err:
-                        logger.warning(f"[AUTONEXIS SELF-CHECK WARNING] {chk_err}")
-
-                    clean_ans = await self._sanitize_response(
-                        client, endpoint, headers, active_model,
-                        conversation, final_ans, last_user_text, max_tokens
-                    )
-
-                    chunk_size = 8
-                    for i in range(0, len(clean_ans), chunk_size):
-                        sub_str = clean_ans[i:i + chunk_size]
-                        yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
-                        await asyncio.sleep(0.008)
-
-                    yield "data: [DONE]\n\n"
-                    return
-            except Exception as ex:
-                logger.error(f"[AUTONEXIS LLM EXCEPTION] {ex}")
-                yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-        # Pure Real-time Streaming with stream=True towards model provider
-        payload = {
-            "model": active_model,
-            "messages": conversation,
-            "stream": True,
-            "temperature": 0.6,
-            "max_tokens": max_tokens,
-        }
-
-        try:
-            timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
-                    if response.status_code == 429:
-                        await response.aread()
-                        busy_msg = "Voice is busy, please try again shortly" if voice else FRIENDLY_ERROR_MESSAGE
-                        yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': busy_msg}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                    if response.status_code != 200:
-                        error_body = await response.aread()
-                        logger.error(f"[AUTONEXIS LLM STREAM ERROR] Status {response.status_code}: {error_body.decode('utf-8', errors='ignore')}")
-                        yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    async for line in response.aiter_lines():
-                        line_str = line.strip()
-                        if not line_str:
+                        res = await client.post(endpoint, json=payload, headers=headers)
+                        if res.status_code != 200:
+                            last_status = res.status_code
+                            last_body = res.text
+                            last_exc = None
+                            logger.error(f"[AUTONEXIS LLM VISION ERROR] Attempt {attempt_idx + 1} Status {res.status_code}: {last_body[:400]}")
                             continue
-                        if line_str == "data: [DONE]":
-                            break
-                        if line_str.startswith("data: "):
-                            raw_chunk = line_str[6:].strip()
-                            try:
-                                chunk_json = json.loads(raw_chunk)
-                                delta = chunk_json.get("choices", [{}])[0].get("delta", {})
-                                token_piece = delta.get("content", "")
-                                if token_piece:
-                                    yield f"data: {json.dumps({'content': token_piece}, ensure_ascii=False)}\n\n"
-                            except Exception:
-                                pass
 
-                    yield "data: [DONE]\n\n"
-        except Exception as e:
-            logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] {type(e).__name__}")
-            yield f"data: {json.dumps({'error': True, 'content': fallback_error_msg}, ensure_ascii=False)}\n\n"
+                        raw_ans = (res.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+                        if not raw_ans:
+                            last_status = 502
+                            last_body = "Empty vision response"
+                            last_exc = None
+                            continue
+
+                        yield f"data: {json.dumps({'type': 'vision_stage', 'stage': 'checking'}, ensure_ascii=False)}\n\n"
+                        check_convo = list(conversation) + [
+                            {"role": "assistant", "content": raw_ans},
+                            {"role": "user", "content": "Carefully double-check your answer above. Check for any arithmetic mistakes, missed constraints, or visual inaccuracies. If you find any error, provide the corrected answer. If it is 100% correct, reply 'VERIFIED_CORRECT'."}
+                        ]
+                        check_payload = {
+                            "model": candidate_model,
+                            "messages": check_convo,
+                            "stream": False,
+                            "temperature": 0.1,
+                            "max_tokens": max_tokens,
+                        }
+                        final_ans = raw_ans
+                        try:
+                            check_res = await client.post(endpoint, json=check_payload, headers=headers)
+                            if check_res.status_code == 200:
+                                check_text = check_res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                                if check_text and "VERIFIED_CORRECT" not in check_text and len(check_text) > 20:
+                                    final_ans = check_text
+                        except Exception as chk_err:
+                            logger.warning(f"[AUTONEXIS SELF-CHECK WARNING] {chk_err}")
+
+                        clean_ans = await self._sanitize_response(
+                            client, endpoint, headers, candidate_model,
+                            conversation, final_ans, last_user_text, max_tokens
+                        )
+
+                        yield f"data: {json.dumps({'type': 'vision_stage', 'stage': 'writing'}, ensure_ascii=False)}\n\n"
+                        chunk_size = 8
+                        for i in range(0, len(clean_ans), chunk_size):
+                            sub_str = clean_ans[i:i + chunk_size]
+                            yield f"data: {json.dumps({'content': sub_str}, ensure_ascii=False)}\n\n"
+                            await asyncio.sleep(0.008)
+
+                        if debug:
+                            debug_info = {
+                                "payload_kb": round(payload_bytes / 1024, 1),
+                                "image_count": vision_image_count,
+                                "route": "primary" if attempt_idx == 0 else f"fallback-{attempt_idx}",
+                                "fallback_used": attempt_idx > 0,
+                                "attempts": attempt_idx + 1,
+                                "latency_ms": int((time.monotonic() - t_start) * 1000),
+                                "status": 200,
+                                "error": None,
+                            }
+                            yield f"data: {json.dumps({'type': 'vision_debug', 'debug': debug_info}, ensure_ascii=False)}\n\n"
+
+                        yield "data: [DONE]\n\n"
+                        return
+                    except Exception as ex:
+                        last_exc = ex
+                        last_status = None
+                        logger.error(f"[AUTONEXIS LLM VISION EXCEPTION] Attempt {attempt_idx + 1}: {ex}")
+                        continue
+
+            real_err = _format_safe_upstream_error(last_status, last_body, is_vision=True, exc=last_exc)
+            if debug:
+                debug_info = {
+                    "payload_kb": round(payload_bytes / 1024, 1),
+                    "image_count": vision_image_count,
+                    "route": "exhausted",
+                    "fallback_used": len(models_to_try) > 1,
+                    "attempts": len(models_to_try),
+                    "latency_ms": int((time.monotonic() - t_start) * 1000),
+                    "status": last_status or "exception",
+                    "error": real_err,
+                }
+                yield f"data: {json.dumps({'type': 'vision_debug', 'debug': debug_info}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': True, 'rate_limited': (last_status == 429), 'content': real_err}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
+            return
+
+        # Pure Real-time Streaming with stream=True (with fallback chain for vision)
+        if is_vision:
+            yield f"data: {json.dumps({'type': 'vision_stage', 'stage': 'reading'}, ensure_ascii=False)}\n\n"
+
+        last_status = None
+        last_body = ""
+        last_exc = None
+        timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt_idx, candidate_model in enumerate(models_to_try):
+                payload = {
+                    "model": candidate_model,
+                    "messages": conversation,
+                    "stream": True,
+                    "temperature": 0.6,
+                    "max_tokens": max_tokens,
+                }
+                try:
+                    async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                        if response.status_code != 200:
+                            err_bytes = await response.aread()
+                            last_status = response.status_code
+                            last_body = err_bytes.decode("utf-8", errors="ignore")
+                            last_exc = None
+                            logger.error(f"[AUTONEXIS LLM STREAM ERROR] Attempt {attempt_idx + 1} Status {response.status_code}: {last_body[:400]}")
+                            if is_vision and attempt_idx + 1 < len(models_to_try):
+                                continue
+                            if response.status_code == 429 and voice:
+                                yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': 'Voice is busy, please try again shortly'}, ensure_ascii=False)}\n\n"
+                                yield "data: [DONE]\n\n"
+                                return
+                            real_err = _format_safe_upstream_error(last_status, last_body, is_vision=is_vision)
+                            if debug and is_vision:
+                                yield f"data: {json.dumps({'type': 'vision_debug', 'debug': {'payload_kb': round(payload_bytes / 1024, 1), 'image_count': vision_image_count, 'route': 'exhausted', 'fallback_used': attempt_idx > 0, 'attempts': attempt_idx + 1, 'latency_ms': int((time.monotonic() - t_start) * 1000), 'status': last_status, 'error': real_err}}, ensure_ascii=False)}\n\n"
+                            yield f"data: {json.dumps({'error': True, 'rate_limited': (response.status_code == 429), 'content': real_err}, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        wrote_header_stage = False
+                        async for line in response.aiter_lines():
+                            line_str = line.strip()
+                            if not line_str:
+                                continue
+                            if line_str == "data: [DONE]":
+                                break
+                            if line_str.startswith("data: "):
+                                raw_chunk = line_str[6:].strip()
+                                try:
+                                    chunk_json = json.loads(raw_chunk)
+                                    delta = chunk_json.get("choices", [{}])[0].get("delta", {})
+                                    token_piece = delta.get("content", "")
+                                    if token_piece:
+                                        if is_vision and not wrote_header_stage:
+                                            wrote_header_stage = True
+                                            yield f"data: {json.dumps({'type': 'vision_stage', 'stage': 'writing'}, ensure_ascii=False)}\n\n"
+                                        yield f"data: {json.dumps({'content': token_piece}, ensure_ascii=False)}\n\n"
+                                except Exception:
+                                    pass
+
+                        if debug and is_vision:
+                            yield f"data: {json.dumps({'type': 'vision_debug', 'debug': {'payload_kb': round(payload_bytes / 1024, 1), 'image_count': vision_image_count, 'route': 'primary' if attempt_idx == 0 else f'fallback-{attempt_idx}', 'fallback_used': attempt_idx > 0, 'attempts': attempt_idx + 1, 'latency_ms': int((time.monotonic() - t_start) * 1000), 'status': 200, 'error': None}}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                except Exception as e:
+                    last_exc = e
+                    last_status = None
+                    logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] Attempt {attempt_idx + 1}: {type(e).__name__}")
+                    if is_vision and attempt_idx + 1 < len(models_to_try):
+                        continue
+
+        real_err = _format_safe_upstream_error(last_status, last_body, is_vision=is_vision, exc=last_exc)
+        if debug and is_vision:
+            yield f"data: {json.dumps({'type': 'vision_debug', 'debug': {'payload_kb': round(payload_bytes / 1024, 1), 'image_count': vision_image_count, 'route': 'exhausted', 'fallback_used': len(models_to_try) > 1, 'attempts': len(models_to_try), 'latency_ms': int((time.monotonic() - t_start) * 1000), 'status': last_status or 'exception', 'error': real_err}}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'error': True, 'rate_limited': (last_status == 429), 'content': real_err}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
 
     async def chat_non_stream(
         self,
@@ -846,10 +1044,13 @@ class LLMClient:
         voice: bool = False,
         uid: Optional[str] = None,
         router_result: Optional[Dict[str, Any]] = None,
+        debug: bool = False,
     ) -> Dict[str, Any]:
         """
         Non-streaming completion fallback with profanity safeguard and image router support.
         """
+        t_start = time.monotonic()
+        messages = prune_historical_images(messages, keep_latest=1)
         last_user_text = get_last_user_text(messages)
         if router_result and not voice and router_result.get("intent") in ("image", "image_edit"):
             safe_router = {
@@ -909,17 +1110,18 @@ class LLMClient:
         }
         active_model = self._get_active_model(messages)
         is_vision = has_image_content(messages)
+        vision_image_count = _count_images_in_messages(messages) if is_vision else 0
         is_math = is_math_request(messages)
         fallback_error_msg = (
             "Voice is busy, please try again shortly"
             if voice
-            else (VISION_ERROR_MESSAGE if is_vision else FRIENDLY_ERROR_MESSAGE)
+            else FRIENDLY_ERROR_MESSAGE
         )
 
         has_tavily = bool(_get_tavily_key())
         web_search_requested = bool(user_context and user_context.get("web_search"))
         use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
-        needs_tool_loop = is_math or use_web_tool
+        needs_tool_loop = (not is_vision) and (is_math or use_web_tool)
         voice_max_tokens = 340 if _CODE_OR_TABLE_RE.search(last_user_text or "") else 250
 
         if needs_tool_loop:
@@ -1006,31 +1208,74 @@ class LLMClient:
             is_math=False,
             voice=voice,
         )
-        payload = {
-            "model": active_model,
-            "messages": conversation,
-            "stream": False,
-            "temperature": 0.6,
-            "max_tokens": max_tokens,
-        }
+        models_to_try = self._get_vision_models() if is_vision else [active_model]
+        payload_bytes = _estimate_payload_bytes({"messages": conversation})
+        last_status: Optional[int] = None
+        last_body = ""
+        last_exc: Optional[Exception] = None
 
-        try:
-            timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                res = await client.post(endpoint, json=payload, headers=headers)
-                if res.status_code != 200:
-                    logger.error(f"[AUTONEXIS LLM ERROR] {res.status_code}: {res.text}")
-                    return {"reply": fallback_error_msg}
-                data = res.json()
-                reply = data["choices"][0]["message"]["content"]
-                clean_reply = await self._sanitize_response(
-                    client, endpoint, headers, active_model,
-                    conversation, reply, last_user_text, max_tokens
-                )
-                return {"reply": clean_reply}
-        except Exception as e:
-            logger.error(f"[AUTONEXIS LLM EXCEPTION] {e}")
-            return {"reply": fallback_error_msg}
+        timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt_idx, candidate_model in enumerate(models_to_try):
+                payload = {
+                    "model": candidate_model,
+                    "messages": conversation,
+                    "stream": False,
+                    "temperature": 0.6,
+                    "max_tokens": max_tokens,
+                }
+                try:
+                    res = await client.post(endpoint, json=payload, headers=headers)
+                    if res.status_code != 200:
+                        last_status = res.status_code
+                        last_body = res.text
+                        last_exc = None
+                        logger.error(f"[AUTONEXIS LLM ERROR] Attempt {attempt_idx + 1} {res.status_code}: {res.text[:400]}")
+                        continue
+                    data = res.json()
+                    reply = (data["choices"][0]["message"]["content"] or "").strip()
+                    if not reply:
+                        last_status = 502
+                        last_body = "Empty response from vision service"
+                        last_exc = None
+                        continue
+                    clean_reply = await self._sanitize_response(
+                        client, endpoint, headers, candidate_model,
+                        conversation, reply, last_user_text, max_tokens
+                    )
+                    out: Dict[str, Any] = {"reply": clean_reply}
+                    if debug and is_vision:
+                        out["debug"] = {
+                            "payload_kb": round(payload_bytes / 1024, 1),
+                            "image_count": vision_image_count,
+                            "route": "primary" if attempt_idx == 0 else f"fallback-{attempt_idx}",
+                            "fallback_used": attempt_idx > 0,
+                            "attempts": attempt_idx + 1,
+                            "latency_ms": int((time.monotonic() - t_start) * 1000),
+                            "status": 200,
+                            "error": None,
+                        }
+                    return out
+                except Exception as e:
+                    last_exc = e
+                    last_status = None
+                    logger.error(f"[AUTONEXIS LLM EXCEPTION] Attempt {attempt_idx + 1}: {e}")
+                    continue
+
+        real_err = _format_safe_upstream_error(last_status, last_body, is_vision=is_vision, exc=last_exc)
+        err_out: Dict[str, Any] = {"reply": real_err, "error": True}
+        if debug and is_vision:
+            err_out["debug"] = {
+                "payload_kb": round(payload_bytes / 1024, 1),
+                "image_count": vision_image_count,
+                "route": "exhausted",
+                "fallback_used": len(models_to_try) > 1,
+                "attempts": len(models_to_try),
+                "latency_ms": int((time.monotonic() - t_start) * 1000),
+                "status": last_status or "exception",
+                "error": real_err,
+            }
+        return err_out
 
     async def extract_memories(
         self,

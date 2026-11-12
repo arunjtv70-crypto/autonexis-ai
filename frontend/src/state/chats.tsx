@@ -9,6 +9,8 @@ import {
   type MultimodalPart,
   type ImageRouterMeta,
   type ImageGenerationResultPayload,
+  type VisionStage,
+  type VisionDebugInfo,
 } from "../api/client";
 import { APP_VERSION } from "../config";
 import { useAuth } from "./auth";
@@ -89,12 +91,16 @@ export interface MessageItem {
   warnings?: string[];
   errorMessage?: string;
   routerMeta?: ImageRouterMeta;
+  visionDebug?: VisionDebugInfo;
   videoDuration?: string;
 }
 
 export interface AttachmentImageItem {
   dataUrl: string;
   fileName: string;
+  tiles?: string[];
+  originalDataUrl?: string;
+  decodedCodes?: Array<{ rawValue: string; format: string }>;
 }
 
 export interface AttachmentPayload {
@@ -248,6 +254,9 @@ export interface ChatsContextType {
     callbacks: VoiceTurnCallbacks
   ) => Promise<{ chatId: string; fullText: string; rateLimited?: boolean }>;
   isSending: boolean;
+  visionStage: VisionStage | null;
+  cancelActiveReply: () => void;
+  getSessionOriginalUrl: (displayUrl: string) => string | undefined;
   guestMsgCount: number;
   guestMessagesRemaining: number;
   showGuestLimitModal: boolean;
@@ -790,6 +799,37 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const activeChatIdRef = useRef<string | null>(activeChatId);
   activeChatIdRef.current = activeChatId;
   const [isSending, setIsSending] = useState(false);
+  const [visionStage, setVisionStage] = useState<VisionStage | null>(null);
+  const sessionOriginalsRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    sessionOriginalsRef.current.clear();
+  }, [currentUid]);
+
+  const rememberSessionOriginal = useCallback((displayUrl: string, originalUrl?: string) => {
+    if (!displayUrl || !originalUrl) return;
+    const map = sessionOriginalsRef.current;
+    if (map.has(displayUrl)) map.delete(displayUrl);
+    map.set(displayUrl, originalUrl);
+    while (map.size > 24) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey) map.delete(oldestKey);
+      else break;
+    }
+  }, []);
+
+  const getSessionOriginalUrl = useCallback((displayUrl: string): string | undefined => {
+    return sessionOriginalsRef.current.get(displayUrl);
+  }, []);
+
+  const cancelActiveReply = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setVisionStage(null);
+    setIsSending(false);
+  }, []);
 
   // Firestore pagination state
   const lastDocRef = useRef<any>(null);
@@ -2833,6 +2873,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       saveAssistantReply(finalReplyText);
       triggerMemoryExtraction(trimmedQuery, finalReplyText);
       triggerNotificationAndSound(finalReplyText);
+      setVisionStage(null);
       setIsSending(false);
     };
 
@@ -2843,6 +2884,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           saveAssistantReply(displayedBuffer);
         }
         if (!handledByImageStream) {
+          setVisionStage(null);
           setIsSending(false);
         }
         return;
@@ -2913,6 +2955,12 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const projectContext = await resolveProjectContext(projectId, trimmedQuery);
 
+    const latestTurnHasImages =
+      historyPayload.length > 0 &&
+      Array.isArray(historyPayload[historyPayload.length - 1]?.content) &&
+      (historyPayload[historyPayload.length - 1].content as MultimodalPart[]).some((p) => p.type === "image_url");
+    setVisionStage(latestTurnHasImages ? "reading" : null);
+
     try {
       await streamChatMessage(
         historyPayload,
@@ -2922,6 +2970,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           if (activeUidRef.current !== requestUid || controller.signal.aborted || handledByImageStream) {
             stopAnimation();
             return;
+          }
+          if (latestTurnHasImages && !displayedBuffer && !pendingBuffer) {
+            setVisionStage("writing");
           }
           if (prefersReducedMotion) {
             displayedBuffer += chunk;
@@ -2938,47 +2989,62 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           if (activeUidRef.current !== requestUid || controller.signal.aborted) {
             stopAnimation();
             if (!handledByImageStream && displayedBuffer) saveAssistantReply(displayedBuffer);
+            setVisionStage(null);
             setIsSending(false);
             return;
           }
           if (handledByImageStream) {
             stopAnimation();
+            setVisionStage(null);
             return;
           }
           isStreamDone = true;
           if (prefersReducedMotion || pendingBuffer.length === 0) {
             stopAnimation();
+            setVisionStage(null);
             completeTextReply(displayedBuffer);
           }
         },
-        async () => {
+        async (streamErr) => {
           if (activeUidRef.current !== requestUid || controller.signal.aborted || handledByImageStream) {
             stopAnimation();
             if (!handledByImageStream && displayedBuffer) saveAssistantReply(displayedBuffer);
+            setVisionStage(null);
             setIsSending(false);
             return;
           }
           if (!displayedBuffer && !pendingBuffer) {
-            try {
-              const reply = await postChatMessage(
-                historyPayload,
-                memoryPrompt,
-                userContext,
-                isGuest,
-                projectContext,
-                relevantPastChats,
-                customStylePayload
-              );
-              if (activeUidRef.current !== requestUid || controller.signal.aborted) {
-                return;
+            const errMsg = typeof streamErr?.message === "string" ? streamErr.message : "";
+            const isHardError = Boolean(errMsg && !/failed to fetch|networkerror|load failed/i.test(errMsg));
+            if (isHardError) {
+              flushDisplay(errMsg);
+              updateMessageInChat(capturedChatId, assistantMsgId, { errorMessage: errMsg });
+            } else {
+              try {
+                const reply = await postChatMessage(
+                  historyPayload,
+                  memoryPrompt,
+                  userContext,
+                  isGuest,
+                  projectContext,
+                  relevantPastChats,
+                  customStylePayload
+                );
+                if (activeUidRef.current !== requestUid || controller.signal.aborted) {
+                  return;
+                }
+                flushDisplay(reply);
+                await completeTextReply(reply);
+              } catch (fallbackErr: any) {
+                const msg = fallbackErr?.message || "Could not complete request.";
+                flushDisplay(msg);
               }
-              flushDisplay(reply);
-              await completeTextReply(reply);
-            } catch {}
+            }
           } else {
             await completeTextReply(displayedBuffer);
           }
           stopAnimation();
+          setVisionStage(null);
           setIsSending(false);
         },
         isGuest,
@@ -2992,6 +3058,14 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           forceImageMode: false,
           imageStyle,
           imageAspect,
+          onVisionStage: (st) => {
+            if (activeUidRef.current === requestUid && !controller.signal.aborted) {
+              setVisionStage(st);
+            }
+          },
+          onVisionDebug: (dbg) => {
+            updateMessageInChat(capturedChatId, assistantMsgId, { visionDebug: dbg });
+          },
           onRouterMeta: (meta) => {
             updateMessageInChat(capturedChatId, assistantMsgId, { routerMeta: meta });
           },
@@ -3335,11 +3409,25 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }));
 
     if (attachedImages.length > 0) {
-      const parts: MultimodalPart[] = [
-        { type: "text", text: trimmed || "Please inspect and analyze the attached images." },
-      ];
+      const qrNotes: string[] = [];
+      for (const img of attachedImages) {
+        rememberSessionOriginal(img.dataUrl, img.originalDataUrl);
+        if (img.decodedCodes && img.decodedCodes.length > 0) {
+          for (const code of img.decodedCodes) {
+            qrNotes.push(`[Detected ${code.format || "code"} in ${img.fileName}: ${code.rawValue}]`);
+          }
+        }
+      }
+      const userQuestion = trimmed || "Please inspect and analyze the attached images.";
+      const combinedPrompt = qrNotes.length > 0 ? `${userQuestion}\n\n${qrNotes.join("\n")}` : userQuestion;
+      const parts: MultimodalPart[] = [{ type: "text", text: combinedPrompt }];
       for (const img of attachedImages) {
         parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+        if (img.tiles && img.tiles.length > 0) {
+          for (const tileUrl of img.tiles) {
+            parts.push({ type: "image_url", image_url: { url: tileUrl } });
+          }
+        }
       }
       historyPayload.push({ role: "user", content: parts });
     } else if (fullFilePayload) {
@@ -3749,6 +3837,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         dismissDeleteError,
         runVoiceCallTurn,
         isSending,
+        visionStage,
+        cancelActiveReply,
+        getSessionOriginalUrl,
         guestMsgCount,
         guestMessagesRemaining,
         showGuestLimitModal,

@@ -4,7 +4,8 @@
  */
 
 export function isImageFile(file: File): boolean {
-  return file.type.startsWith("image/");
+  if (file.type.startsWith("image/")) return true;
+  return /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i.test(file.name || "");
 }
 
 export function isPdfFile(file: File): boolean {
@@ -136,8 +137,8 @@ export async function compressImagesBatch(
     return { results, total };
   };
 
-  // Target: Under 3.2 MB total (well below 4.5 MB Vercel limit)
-  const MAX_ALLOWED_BYTES = 3.2 * 1024 * 1024;
+  // Target: Under 2.25 MB total image dataUrl bytes so full JSON body stays < 3 MB
+  const MAX_ALLOWED_BYTES = 2.25 * 1024 * 1024;
 
   let attempt = await tryCompress(maxDim, quality);
 
@@ -158,7 +159,7 @@ export async function compressImagesBatch(
     attempt = await tryCompress(maxDim, quality);
   }
 
-  if (attempt.total > 3.6 * 1024 * 1024) {
+  if (attempt.total > 2.6 * 1024 * 1024) {
     return {
       images: attempt.results,
       totalBytes: attempt.total,
@@ -193,6 +194,15 @@ export interface PdfExtractResult {
   isScanned: boolean;
 }
 
+async function loadPdfDocument(file: File) {
+  const pdfjsLib = await import("pdfjs-dist");
+  const workerModule = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default;
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  return loadingTask.promise;
+}
+
 /**
  * Lazily loads pdfjs-dist with its local worker and extracts text from a PDF file.
  * Limits: up to maxPages (default 20) and maxChars (default 30,000).
@@ -203,13 +213,7 @@ export async function extractPdfText(
   maxPages = 20,
   maxChars = 30000
 ): Promise<PdfExtractResult> {
-  const pdfjsLib = await import("pdfjs-dist");
-  const workerModule = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default;
-
-  const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-  const pdf = await loadingTask.promise;
+  const pdf = await loadPdfDocument(file);
 
   const totalPages = pdf.numPages || 0;
   const pagesToRead = Math.min(totalPages, maxPages);
@@ -321,5 +325,58 @@ export async function compressImageDataUrlToJpeg(
     }
   }
   return tryEncode(480, 0.35);
+}
+
+/**
+ * Renders up to maxPages (default 5) of a scanned PDF into JPEG File objects
+ * so they flow straight through the standard image intake pipeline.
+ */
+export async function renderPdfPagesAsImageFiles(
+  file: File,
+  maxPages = 5,
+  signal?: AbortSignal,
+  onProgress?: (msg: string) => void
+): Promise<{ files: File[]; totalPages: number; renderedPages: number }> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const pdf = await loadPdfDocument(file);
+  const totalPages = pdf.numPages || 0;
+  const renderedPages = Math.min(totalPages, maxPages);
+  const files: File[] = [];
+  const baseName = file.name.replace(/\.pdf$/i, "") || "document";
+
+  for (let pageNum = 1; pageNum <= renderedPages; pageNum++) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    onProgress?.(`Rendering PDF page ${pageNum} of ${renderedPages}...`);
+    const page = await pdf.getPage(pageNum);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const maxDim = Math.max(baseViewport.width, baseViewport.height) || 1000;
+    const scale = Math.max(1.2, Math.min(2.2, 1750 / maxDim));
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas context unavailable for PDF rendering");
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const renderTask = page.render({ canvasContext: ctx, canvas, viewport });
+    await renderTask.promise;
+
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error(`Failed to render PDF page ${pageNum}`))),
+        "image/jpeg",
+        0.9
+      );
+    });
+    files.push(new File([blob], `${baseName}-page-${pageNum}.jpg`, { type: "image/jpeg" }));
+  }
+
+  return { files, totalPages, renderedPages };
 }
 

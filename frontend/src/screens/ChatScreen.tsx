@@ -22,11 +22,22 @@ import {
   isImageFile,
   isTextFile,
   isPdfFile,
-  compressImagesBatch,
   readTextFile,
   extractPdfText,
+  renderPdfPagesAsImageFiles,
   formatFileSize,
 } from "../utils/fileHelpers";
+import {
+  type PreparedImageAttachment,
+  type ImageEditState,
+  DEFAULT_IMAGE_EDITS,
+  intakeImageFiles,
+  finalizeCanvasAsAttachment,
+  packAttachmentsWithinBudget,
+  dataUrlToCanvas,
+  cropHighResRegionAsAttachment,
+} from "../utils/imageIntake";
+import { ImageEditorModal, CameraCaptureModal } from "../components/ImageEditorModal";
 import {
   ImageCreationCard,
   VideoCreationCard,
@@ -116,6 +127,9 @@ export const ChatScreen: React.FC = () => {
     retryFailedDelete,
     dismissDeleteError,
     isSending,
+    visionStage,
+    cancelActiveReply,
+    getSessionOriginalUrl,
     guestMessagesRemaining,
     showGuestLimitModal,
     setShowGuestLimitModal,
@@ -225,9 +239,11 @@ export const ChatScreen: React.FC = () => {
   const [autoSpeak, setAutoSpeak] = useState(false);
   const recognitionRef = useRef<any>(null);
 
-  // File & Image Attachment States (supports up to 4 images, PDF & text files)
+  // File & Image Attachment States (supports up to 4 images, scanned PDF up to 5 pages, camera, paste, drag-drop, editor)
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [attachedImages, setAttachedImages] = useState<Array<{ dataUrl: string; fileName: string }>>([]);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const intakeAbortRef = useRef<AbortController | null>(null);
+  const [attachedImages, setAttachedImages] = useState<PreparedImageAttachment[]>([]);
   const [attachedFile, setAttachedFile] = useState<{
     textContent: string;
     fileName: string;
@@ -237,6 +253,22 @@ export const ChatScreen: React.FC = () => {
   } | null>(null);
   const [fileUploadError, setFileUploadError] = useState<string | null>(null);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState("Preparing the image");
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const dragCounterRef = useRef(0);
+  const [editingImageIndex, setEditingImageIndex] = useState<number | null>(null);
+  const [retakeTargetIndex, setRetakeTargetIndex] = useState<number | null>(null);
+  const [askPartTarget, setAskPartTarget] = useState<{ url: string; fileName: string } | null>(null);
+
+  const isImageEditorOpen = hasOverlay("imageEditor");
+  const isCameraCaptureOpen = hasOverlay("cameraCapture");
+
+  useEffect(() => {
+    if (!isImageEditorOpen) {
+      setEditingImageIndex(null);
+      setAskPartTarget(null);
+    }
+  }, [isImageEditorOpen]);
 
   // Auto-scroll & Dynamic Viewport Tracking
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -547,7 +579,13 @@ export const ChatScreen: React.FC = () => {
         type: "image",
         dataUrl: curImages[0].dataUrl,
         fileName: curImages[0].fileName,
-        images: curImages,
+        images: curImages.map((img) => ({
+          dataUrl: img.usingOriginal ? img.originalDataUrl : img.dataUrl,
+          fileName: img.fileName,
+          tiles: img.usingOriginal ? undefined : img.tiles,
+          originalDataUrl: img.originalDataUrl,
+          decodedCodes: img.decodedCodes.map((c) => ({ rawValue: c.rawValue, format: c.format })),
+        })),
       };
     } else if (curFile) {
       attachmentPayload = {
@@ -589,47 +627,111 @@ export const ChatScreen: React.FC = () => {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
+  const cancelFileIntake = () => {
+    if (intakeAbortRef.current) {
+      intakeAbortRef.current.abort();
+      intakeAbortRef.current = null;
+    }
+    setIsProcessingFile(false);
+    setProcessingLabel("Preparing the image");
+  };
+
+  const processIncomingFiles = async (
+    rawFiles: File[],
+    source: PreparedImageAttachment["source"],
+    replaceIdx?: number | null
+  ) => {
+    if (!rawFiles || rawFiles.length === 0) return;
 
     if (isGuest) {
       setShowGuestLimitModal(true);
-      e.target.value = "";
       return;
     }
 
+    if (intakeAbortRef.current) {
+      intakeAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    intakeAbortRef.current = controller;
+
     try {
       setIsProcessingFile(true);
+      setProcessingLabel("Preparing the image");
       setFileUploadError(null);
-      const files = Array.from(fileList);
-      const imageFiles = files.filter(isImageFile);
-      const pdfFiles = files.filter(isPdfFile);
-      const textFiles = files.filter(isTextFile);
+
+      const imageFiles = rawFiles.filter(isImageFile);
+      const pdfFiles = rawFiles.filter(isPdfFile);
+      const textFiles = rawFiles.filter(isTextFile);
 
       if (imageFiles.length > 0) {
+        if (replaceIdx !== null && replaceIdx !== undefined && replaceIdx >= 0 && replaceIdx < attachedImages.length) {
+          const withoutTarget = attachedImages.filter((_, i) => i !== replaceIdx);
+          const { items, errors } = await intakeImageFiles([imageFiles[0]], withoutTarget, {
+            source,
+            maxCount: 4,
+            signal: controller.signal,
+            onProgress: setProcessingLabel,
+          });
+          setAttachedImages(items);
+          setAttachedFile(null);
+          if (errors.length > 0) setFileUploadError(errors[0]);
+          return;
+        }
+
         const remainingSlots = Math.max(0, 4 - attachedImages.length);
         if (remainingSlots === 0) {
           setFileUploadError("You can attach up to 4 images per message.");
           return;
         }
-        const toProcess = imageFiles.slice(0, remainingSlots);
-        const result = await compressImagesBatch(toProcess);
-        if (result.error) {
-          setFileUploadError(result.error);
-        } else {
-          setAttachedImages((prev) => [...prev, ...result.images].slice(0, 4));
-          setAttachedFile(null);
+        const { items, errors } = await intakeImageFiles(imageFiles, attachedImages, {
+          source,
+          maxCount: 4,
+          signal: controller.signal,
+          onProgress: setProcessingLabel,
+        });
+        setAttachedImages(items);
+        setAttachedFile(null);
+        if (imageFiles.length > remainingSlots) {
+          setFileUploadError(`Only the first 4 images can be attached per message.`);
+        } else if (errors.length > 0) {
+          setFileUploadError(errors.join(" "));
         }
       } else if (pdfFiles.length > 0) {
         const pdfFile = pdfFiles[0];
+        setProcessingLabel("Reading PDF...");
         const res = await extractPdfText(pdfFile, 20, 30000);
+        if (controller.signal.aborted) return;
+
         if (res.isScanned) {
-          setFileUploadError(
-            `"${pdfFile.name}" has no selectable text (looks like a scanned PDF). Please take screenshots or export the pages as images and attach them instead.`
+          const rendered = await renderPdfPagesAsImageFiles(
+            pdfFile,
+            5,
+            controller.signal,
+            setProcessingLabel
           );
+          if (controller.signal.aborted) return;
+          if (rendered.files.length === 0) {
+            setFileUploadError(`"${pdfFile.name}" has no pages that could be rendered.`);
+            return;
+          }
+          const { items, errors } = await intakeImageFiles(rendered.files, [], {
+            source: "pdf",
+            maxCount: 5,
+            signal: controller.signal,
+            onProgress: setProcessingLabel,
+          });
+          setAttachedImages(items);
+          setAttachedFile(null);
+          if (errors.length > 0) {
+            setFileUploadError(errors.join(" "));
+          } else if (rendered.totalPages > 5) {
+            setFileUploadError(
+              `Rendered first 5 of ${rendered.totalPages} scanned pages from "${pdfFile.name}".`
+            );
+          }
           return;
         }
+
         setAttachedFile({
           textContent: res.text,
           fileName: pdfFile.name,
@@ -641,6 +743,7 @@ export const ChatScreen: React.FC = () => {
       } else if (textFiles.length > 0) {
         const tf = textFiles[0];
         const rawText = await readTextFile(tf);
+        if (controller.signal.aborted) return;
         const truncated = rawText.length > 30000;
         setAttachedFile({
           textContent: truncated ? rawText.slice(0, 30000) : rawText,
@@ -653,14 +756,154 @@ export const ChatScreen: React.FC = () => {
         });
         setAttachedImages([]);
       } else {
-        setFileUploadError("Unsupported file format. Attach images, PDF, or text/code files.");
+        setFileUploadError(
+          `Unsupported file format (${rawFiles[0]?.name || "unknown"}). Supported: JPEG, PNG, WebP, GIF, BMP, AVIF, HEIC/HEIF, PDF, or text/code files.`
+        );
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return;
+      }
       console.error("[AUTONEXIS] Attachment processing error:", err);
-      setFileUploadError("Unable to read this file. Please try a smaller or text-based file.");
+      setFileUploadError(err?.message || "Unable to read this file. Please try another image or file.");
+    } finally {
+      if (intakeAbortRef.current === controller) {
+        intakeAbortRef.current = null;
+      }
+      setIsProcessingFile(false);
+      setProcessingLabel("Preparing the image");
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    const targetIdx = retakeTargetIndex;
+    setRetakeTargetIndex(null);
+    e.target.value = "";
+    await processIncomingFiles(files, "gallery", targetIdx);
+  };
+
+  const handleCameraInputCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    const targetIdx = retakeTargetIndex;
+    setRetakeTargetIndex(null);
+    e.target.value = "";
+    await processIncomingFiles(files, "camera", targetIdx);
+  };
+
+  const handleComposerPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items || []);
+    const pastedFiles: File[] = [];
+    for (const item of items) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) pastedFiles.push(f);
+      }
+    }
+    if (pastedFiles.length > 0) {
+      e.preventDefault();
+      await processIncomingFiles(pastedFiles, "paste");
+    }
+  };
+
+  const handleAutoFixImage = async (idx: number) => {
+    const target = attachedImages[idx];
+    if (!target) return;
+    try {
+      setIsProcessingFile(true);
+      setProcessingLabel("Preparing the image");
+      const canvas = await dataUrlToCanvas(target.originalDataUrl);
+      const needsRotate = target.issues.some((i) => i.code === "needsRotate90");
+      const nextEdits: ImageEditState = {
+        ...target.edits,
+        autoEnhance: true,
+        rotateDeg: needsRotate ? (((target.edits.rotateDeg + 90) % 360) as 0 | 90 | 180 | 270) : target.edits.rotateDeg,
+      };
+      const updated = await finalizeCanvasAsAttachment(
+        target.id,
+        target.fileName,
+        target.source,
+        canvas,
+        nextEdits,
+        target.decodedCodes,
+        target.originalDataUrl
+      );
+      const nextArr = attachedImages.map((item, i) => (i === idx ? updated : item));
+      setAttachedImages(await packAttachmentsWithinBudget(nextArr));
+    } catch (err: any) {
+      setFileUploadError(err?.message || "Could not enhance image.");
     } finally {
       setIsProcessingFile(false);
-      e.target.value = "";
+    }
+  };
+
+  const handleApplyEditorChanges = async (idx: number, nextEdits: ImageEditState) => {
+    const target = attachedImages[idx];
+    if (!target) return;
+    try {
+      setIsProcessingFile(true);
+      setProcessingLabel("Preparing the image");
+      const canvas = await dataUrlToCanvas(target.originalDataUrl);
+      const updated = await finalizeCanvasAsAttachment(
+        target.id,
+        target.fileName,
+        target.source,
+        canvas,
+        nextEdits,
+        target.decodedCodes,
+        target.originalDataUrl
+      );
+      const nextArr = attachedImages.map((item, i) => (i === idx ? updated : item));
+      setAttachedImages(await packAttachmentsWithinBudget(nextArr));
+    } catch (err: any) {
+      setFileUploadError(err?.message || "Could not update image.");
+    } finally {
+      setIsProcessingFile(false);
+    }
+  };
+
+  const handleToggleUseOriginal = async (idx: number) => {
+    const updated = attachedImages.map((item, i) =>
+      i === idx ? { ...item, usingOriginal: !item.usingOriginal, dismissedIssues: true } : item
+    );
+    setAttachedImages(await packAttachmentsWithinBudget(updated));
+  };
+
+  const handleOpenAskAboutPart = (displayUrl: string, fileName = "selected-part.jpg") => {
+    if (isGuest) {
+      setShowGuestLimitModal(true);
+      return;
+    }
+    const origUrl = getSessionOriginalUrl(displayUrl) || displayUrl;
+    setAskPartTarget({ url: origUrl, fileName });
+    pushOverlay("imageEditor");
+  };
+
+  const handleConfirmAskAboutPart = async (cropRect: { x: number; y: number; w: number; h: number }) => {
+    if (!askPartTarget) return;
+    try {
+      setIsProcessingFile(true);
+      setProcessingLabel("Preparing the image");
+      const cropped = await cropHighResRegionAsAttachment(
+        askPartTarget.url,
+        `focus-${askPartTarget.fileName}`,
+        cropRect
+      );
+      const nextArr = await packAttachmentsWithinBudget([...attachedImages, cropped].slice(0, 4));
+      setAttachedImages(nextArr);
+      setAttachedFile(null);
+      if (!inputContent.trim()) {
+        setInputContent("Please focus on this selected part of the image:");
+      }
+      setTimeout(() => textareaRef.current?.focus(), 60);
+    } catch (err: any) {
+      setFileUploadError(err?.message || "Could not crop that image section.");
+    } finally {
+      setIsProcessingFile(false);
     }
   };
 
@@ -1192,6 +1435,308 @@ export const ChatScreen: React.FC = () => {
     );
   };
 
+  const renderVisionProgressStatus = () => {
+    if (!isProcessingFile && !(isSending && visionStage)) return null;
+    const labelMap: Record<string, string> = {
+      preparing: processingLabel || "Preparing the image",
+      reading: "Reading",
+      checking: "Checking details",
+      writing: "Writing the answer",
+    };
+    const statusText = isProcessingFile ? (processingLabel || "Preparing the image") : labelMap[visionStage || "reading"];
+    return (
+      <div className="vision-progress-strip" role="status" aria-live="polite">
+        <div className="vision-progress-left">
+          <span className="vision-progress-dot" />
+          <span className="vision-progress-label">{statusText}...</span>
+        </div>
+        <button
+          type="button"
+          className="vision-progress-cancel-btn"
+          onClick={isProcessingFile ? cancelFileIntake : cancelActiveReply}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  };
+
+  const renderComposerAttachmentArea = () => (
+    <>
+      {attachedImages.length > 0 && (
+        <div className="attached-images-preview-row">
+          {attachedImages.map((img, idx) => {
+            const visibleIssues = img.dismissedIssues ? [] : img.issues;
+            const hasAutoFix = visibleIssues.some((iss) => iss.autoFixable);
+            const hasBeenModified =
+              img.edits.autoEnhance ||
+              img.edits.rotateDeg !== 0 ||
+              img.edits.brightness !== 0 ||
+              img.edits.contrast !== 0 ||
+              Boolean(img.edits.crop);
+            return (
+              <div key={img.id} className="attached-image-card">
+                <div className="attachment-indicator-pill attached-image-indicator">
+                  <img
+                    src={img.usingOriginal ? img.originalDataUrl : img.dataUrl}
+                    alt={`Thumbnail ${idx + 1}`}
+                    className="input-thumb-preview clickable"
+                    onClick={() => {
+                      setEditingImageIndex(idx);
+                      setAskPartTarget(null);
+                      pushOverlay("imageEditor");
+                    }}
+                    title="Click to crop, rotate, or adjust brightness & contrast"
+                  />
+                  <div className="attachment-meta-col">
+                    <span className="attachment-filename">{img.fileName}</span>
+                    <span className="attachment-submeta">
+                      {img.width}×{img.height}
+                      {img.tiles && img.tiles.length > 0 && !img.usingOriginal
+                        ? ` · ${img.tiles.length} sections`
+                        : ""}
+                      {img.usingOriginal ? " · Original" : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="attachment-edit-btn"
+                    onClick={() => {
+                      setEditingImageIndex(idx);
+                      setAskPartTarget(null);
+                      pushOverlay("imageEditor");
+                    }}
+                    title="Crop, rotate, brightness & contrast"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAttachedImages((prev) => prev.filter((_, i) => i !== idx))}
+                    className="attachment-remove-btn"
+                    aria-label={`Remove image ${idx + 1}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Quality Checks + Non-blocking Hints + Auto-Fix / Retake / Send Anyway */}
+                {(visibleIssues.length > 0 || hasBeenModified) && (
+                  <div className="attachment-quality-bar">
+                    {visibleIssues.length > 0 && (
+                      <span className="attachment-quality-hint">
+                        {visibleIssues.map((i) => i.label).join(" · ")}
+                      </span>
+                    )}
+                    <div className="attachment-quality-actions">
+                      {hasAutoFix && !img.usingOriginal && (
+                        <button
+                          type="button"
+                          className="quality-action-btn primary"
+                          onClick={() => handleAutoFixImage(idx)}
+                        >
+                          Fix
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="quality-action-btn"
+                        onClick={() => {
+                          setRetakeTargetIndex(idx);
+                          pushOverlay("cameraCapture");
+                        }}
+                      >
+                        Retake
+                      </button>
+                      {hasBeenModified && (
+                        <button
+                          type="button"
+                          className="quality-action-btn"
+                          onClick={() => handleToggleUseOriginal(idx)}
+                        >
+                          {img.usingOriginal ? "Use enhanced" : "Send original"}
+                        </button>
+                      )}
+                      {visibleIssues.length > 0 && (
+                        <button
+                          type="button"
+                          className="quality-action-btn"
+                          onClick={() =>
+                            setAttachedImages((prev) =>
+                              prev.map((it, i) => (i === idx ? { ...it, dismissedIssues: true } : it))
+                            )
+                          }
+                        >
+                          Send anyway
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Local QR / Barcode Preview (Never Auto-Opened) */}
+                {img.decodedCodes.length > 0 && (
+                  <div className="attachment-barcode-list">
+                    {img.decodedCodes.map((code, cIdx) => (
+                      <div
+                        key={cIdx}
+                        className={`attachment-barcode-card ${code.isShortener || code.isSuspicious ? "is-warn" : ""}`}
+                      >
+                        <div className="barcode-header-row">
+                          <span className="barcode-badge">{code.isUrl ? "Link detected" : "Code detected"}</span>
+                          {code.hostname && <strong className="barcode-domain">{code.hostname}</strong>}
+                          <div className="barcode-actions">
+                            <button
+                              type="button"
+                              className="barcode-action-btn"
+                              onClick={() => navigator.clipboard?.writeText(code.rawValue)}
+                            >
+                              Copy
+                            </button>
+                            {code.isUrl && (
+                              <a
+                                href={code.rawValue}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="barcode-action-btn"
+                              >
+                                Open
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                        <div className="barcode-raw-value">{code.displayUrl || code.rawValue}</div>
+                        {code.warning && <div className="barcode-warning-text">{code.warning}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {attachedImages.length < 4 && (
+            <button
+              type="button"
+              className="add-more-images-btn"
+              onClick={() => {
+                setRetakeTargetIndex(null);
+                fileInputRef.current?.click();
+              }}
+              title="Add another image (up to 4)"
+            >
+              <IconPlus size={12} />
+              <span>Add ({attachedImages.length}/4)</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {attachedFile && (
+        <div className="attached-file-chip-wrapper">
+          <div className="attachment-indicator-pill">
+            <IconFileText size={13} />
+            <span className="attachment-filename">{attachedFile.fileName}</span>
+            {attachedFile.fileSize ? (
+              <span className="attachment-filesize">
+                ({formatFileSize(attachedFile.fileSize)})
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setAttachedFile(null)}
+              className="attachment-remove-btn"
+              aria-label="Remove file"
+            >
+              ✕
+            </button>
+          </div>
+          {attachedFile.truncationNote && (
+            <div className="attachment-truncation-note">{attachedFile.truncationNote}</div>
+          )}
+        </div>
+      )}
+
+      {fileUploadError && (
+        <div className="attachment-error-note">
+          <span>{fileUploadError}</span>
+          <button type="button" onClick={() => setFileUploadError(null)}>✕</button>
+        </div>
+      )}
+
+      {renderVisionProgressStatus()}
+    </>
+  );
+
+  const renderAttachmentDropdown = (isOpen: boolean, closeMenu: () => void) => {
+    if (!isOpen) return null;
+    return (
+      <div className="attachment-dropdown-menu">
+        <button
+          type="button"
+          className={`attachment-dropdown-item ${inputMode === "image" ? "active" : ""}`}
+          onClick={() => {
+            setInputMode(inputMode === "image" ? "chat" : "image");
+            closeMenu();
+            textareaRef.current?.focus();
+          }}
+        >
+          <IconImage size={14} />
+          <span>Create image</span>
+        </button>
+
+        <button
+          type="button"
+          className="attachment-dropdown-item"
+          onClick={() => {
+            closeMenu();
+            if (isGuest) {
+              setShowGuestLimitModal(true);
+              return;
+            }
+            setRetakeTargetIndex(null);
+            fileInputRef.current?.click();
+          }}
+        >
+          <IconPaperclip size={14} />
+          <span>Attach image, PDF or file</span>
+        </button>
+
+        <button
+          type="button"
+          className="attachment-dropdown-item"
+          onClick={() => {
+            closeMenu();
+            if (isGuest) {
+              setShowGuestLimitModal(true);
+              return;
+            }
+            setRetakeTargetIndex(null);
+            pushOverlay("cameraCapture");
+          }}
+        >
+          <IconImage size={14} />
+          <span>Take photo (Camera)</span>
+        </button>
+
+        <button
+          type="button"
+          className={`attachment-dropdown-item ${isWebSearchActive ? "active" : ""}`}
+          onClick={() => {
+            if (isGuest) {
+              setShowGuestLimitModal(true);
+              return;
+            }
+            setIsWebSearchActive(!isWebSearchActive);
+            closeMenu();
+          }}
+        >
+          <IconGlobe size={14} />
+          <span>Web Search ({isWebSearchActive ? "ON" : "OFF"})</span>
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div className="chat-screen-layout">
       {/* Background Subtle Watermark */}
@@ -1220,7 +1765,42 @@ export const ChatScreen: React.FC = () => {
       )}
 
       {/* Main Chat Center Container */}
-      <div className="chat-main-container">
+      <div
+        className="chat-main-container"
+        onDragEnter={(e) => {
+          if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            dragCounterRef.current += 1;
+            setIsDraggingFiles(true);
+          }
+        }}
+        onDragOver={(e) => {
+          if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+          }
+        }}
+        onDragLeave={() => {
+          dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+          if (dragCounterRef.current === 0) setIsDraggingFiles(false);
+        }}
+        onDrop={async (e) => {
+          e.preventDefault();
+          dragCounterRef.current = 0;
+          setIsDraggingFiles(false);
+          const dropped = Array.from(e.dataTransfer?.files || []);
+          if (dropped.length > 0) {
+            await processIncomingFiles(dropped, "drop");
+          }
+        }}
+      >
+        {isDraggingFiles && (
+          <div className="chat-drop-overlay" aria-live="polite">
+            <div className="chat-drop-overlay-card">
+              <strong>Drop images, PDF, or text files</strong>
+              <span>Up to 4 images or a scanned PDF (first 5 pages)</span>
+            </div>
+          </div>
+        )}
         {/* Top Navbar */}
         <header className="chat-topbar">
           <div className="topbar-left">
@@ -1404,7 +1984,17 @@ export const ChatScreen: React.FC = () => {
           ref={fileInputRef}
           onChange={handleFileUpload}
           multiple
-          accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,.sql,.sh,.yaml,.yml,.env,.log"
+          accept="image/*,.heic,.heif,.avif,.bmp,.pdf,.txt,.md,.csv,.json,.js,.jsx,.ts,.tsx,.py,.html,.css,.sql,.sh,.yaml,.yml,.env,.log"
+          style={{ display: "none" }}
+        />
+
+        {/* Hidden System Camera Input Fallback */}
+        <input
+          type="file"
+          ref={cameraInputRef}
+          onChange={handleCameraInputCapture}
+          accept="image/*"
+          capture="environment"
           style={{ display: "none" }}
         />
 
@@ -1474,6 +2064,7 @@ export const ChatScreen: React.FC = () => {
                     value={inputContent}
                     onChange={(e) => setInputContent(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onPaste={handleComposerPaste}
                     placeholder={
                       inputMode === "image"
                         ? "Describe the visual you want to create..."
@@ -1486,77 +2077,7 @@ export const ChatScreen: React.FC = () => {
                     className="chat-input-textarea"
                   />
 
-                {/* Attached Images Thumbnails Preview (up to 4 images) */}
-                {attachedImages.length > 0 && (
-                  <div className="attached-images-preview-row">
-                    {attachedImages.map((img, idx) => (
-                      <div key={idx} className="attachment-indicator-pill attached-image-indicator">
-                        <img src={img.dataUrl} alt={`Thumbnail ${idx + 1}`} className="input-thumb-preview" />
-                        <span className="attachment-filename">{img.fileName}</span>
-                        <button
-                          type="button"
-                          onClick={() => setAttachedImages((prev) => prev.filter((_, i) => i !== idx))}
-                          className="attachment-remove-btn"
-                          aria-label={`Remove image ${idx + 1}`}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ))}
-                    {attachedImages.length < 4 && (
-                      <button
-                        type="button"
-                        className="add-more-images-btn"
-                        onClick={() => fileInputRef.current?.click()}
-                        title="Add another image (up to 4)"
-                      >
-                        <IconPlus size={12} />
-                        <span>Add ({attachedImages.length}/4)</span>
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Attached PDF/Text/Code File Preview */}
-                {attachedFile && (
-                  <div className="attached-file-chip-wrapper">
-                    <div className="attachment-indicator-pill">
-                      <IconFileText size={13} />
-                      <span className="attachment-filename">{attachedFile.fileName}</span>
-                      {attachedFile.fileSize ? (
-                        <span className="attachment-filesize">
-                          ({formatFileSize(attachedFile.fileSize)})
-                        </span>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => setAttachedFile(null)}
-                        className="attachment-remove-btn"
-                        aria-label="Remove file"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                    {attachedFile.truncationNote && (
-                      <div className="attachment-truncation-note">
-                        {attachedFile.truncationNote}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {fileUploadError && (
-                  <div className="attachment-error-note">
-                    <span>{fileUploadError}</span>
-                    <button type="button" onClick={() => setFileUploadError(null)}>✕</button>
-                  </div>
-                )}
-
-                {isProcessingFile && (
-                  <div className="attachment-indicator-pill">
-                    <span className="attachment-filename">Reading attachment...</span>
-                  </div>
-                )}
+                {renderComposerAttachmentArea()}
 
                 <div className="chat-input-card-bottom">
                   <div className="input-toolbar-left">
@@ -1572,54 +2093,7 @@ export const ChatScreen: React.FC = () => {
                         <IconPlus size={16} />
                       </button>
 
-                      {isHomeAttachmentMenuOpen && (
-                        <div className="attachment-dropdown-menu">
-                          <button
-                            type="button"
-                            className={`attachment-dropdown-item ${inputMode === "image" ? "active" : ""}`}
-                            onClick={() => {
-                              setInputMode(inputMode === "image" ? "chat" : "image");
-                              setIsHomeAttachmentMenuOpen(false);
-                              textareaRef.current?.focus();
-                            }}
-                          >
-                            <IconImage size={14} />
-                            <span>Create image</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            className="attachment-dropdown-item"
-                            onClick={() => {
-                              setIsHomeAttachmentMenuOpen(false);
-                              if (isGuest) {
-                                setShowGuestLimitModal(true);
-                                return;
-                              }
-                              fileInputRef.current?.click();
-                            }}
-                          >
-                            <IconPaperclip size={14} />
-                            <span>Attach image, PDF or file</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            className={`attachment-dropdown-item ${isWebSearchActive ? "active" : ""}`}
-                            onClick={() => {
-                              if (isGuest) {
-                                setShowGuestLimitModal(true);
-                                return;
-                              }
-                              setIsWebSearchActive(!isWebSearchActive);
-                              setIsHomeAttachmentMenuOpen(false);
-                            }}
-                          >
-                            <IconGlobe size={14} />
-                            <span>Web Search ({isWebSearchActive ? "ON" : "OFF"})</span>
-                          </button>
-                        </div>
-                      )}
+                      {renderAttachmentDropdown(isHomeAttachmentMenuOpen, () => setIsHomeAttachmentMenuOpen(false))}
                     </div>
 
                     {/* Active Web Search Indicator Pill */}
@@ -1896,7 +2370,7 @@ export const ChatScreen: React.FC = () => {
                               <span>Voice</span>
                             </div>
                           )}
-                          {/* User uploaded image thumbnails (supports up to 4 images) */}
+                          {/* User uploaded image thumbnails (supports up to 4 images + tap to Ask about this part) */}
                           {isUser && (msg.mediaUrls?.length || msg.mediaUrl) && (
                             <div className="user-uploaded-images-grid">
                               {(msg.mediaUrls || [msg.mediaUrl!]).map((url, imgIdx) => (
@@ -1905,9 +2379,16 @@ export const ChatScreen: React.FC = () => {
                                     src={url}
                                     alt={`Uploaded attachment ${imgIdx + 1}`}
                                     className="user-uploaded-img"
-                                    onClick={() => window.open(url, "_blank")}
-                                    title="Click to view full size"
+                                    onClick={() => handleOpenAskAboutPart(url, `image-${imgIdx + 1}.jpg`)}
+                                    title="Tap to inspect or ask about a specific part"
                                   />
+                                  <button
+                                    type="button"
+                                    className="user-uploaded-ask-part-btn"
+                                    onClick={() => handleOpenAskAboutPart(url, `image-${imgIdx + 1}.jpg`)}
+                                  >
+                                    Ask about part
+                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -2164,6 +2645,13 @@ export const ChatScreen: React.FC = () => {
                               {msg.routerMeta.reason}
                             </div>
                           )}
+
+                          {!isUser && isDebugMode && msg.visionDebug && (
+                            <div className="debug-router-pill" data-testid="vision-debug-line">
+                              vision: {msg.visionDebug.payload_kb} KB · {msg.visionDebug.image_count} img · route:{msg.visionDebug.route} · {msg.visionDebug.latency_ms} ms · status:{msg.visionDebug.status}
+                              {msg.visionDebug.error ? ` · err:${msg.visionDebug.error}` : ""}
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
@@ -2181,11 +2669,30 @@ export const ChatScreen: React.FC = () => {
                         <Logo variant="mark" size="xs" tile="circle" />
                       </div>
                       <div className="message-bubble-box assistant-box">
-                        <div className="typing-dots">
-                          <span className="dot"></span>
-                          <span className="dot"></span>
-                          <span className="dot"></span>
-                        </div>
+                        {visionStage ? (
+                          <div className="vision-bubble-stage">
+                            <div className="typing-dots">
+                              <span className="dot"></span>
+                              <span className="dot"></span>
+                              <span className="dot"></span>
+                            </div>
+                            <span className="vision-bubble-stage-text">
+                              {visionStage === "preparing"
+                                ? "Preparing the image..."
+                                : visionStage === "reading"
+                                ? "Reading..."
+                                : visionStage === "checking"
+                                ? "Checking details..."
+                                : "Writing the answer..."}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="typing-dots">
+                            <span className="dot"></span>
+                            <span className="dot"></span>
+                            <span className="dot"></span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -2265,6 +2772,7 @@ export const ChatScreen: React.FC = () => {
                 value={inputContent}
                 onChange={(e) => setInputContent(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handleComposerPaste}
                 placeholder={
                   inputMode === "image"
                     ? "Describe the visual you want to create..."
@@ -2277,77 +2785,7 @@ export const ChatScreen: React.FC = () => {
                 className="chat-input-textarea"
               />
 
-              {/* Attached Images Thumbnails Preview (up to 4 images) */}
-              {attachedImages.length > 0 && (
-                <div className="attached-images-preview-row">
-                  {attachedImages.map((img, idx) => (
-                    <div key={idx} className="attachment-indicator-pill attached-image-indicator">
-                      <img src={img.dataUrl} alt={`Thumbnail ${idx + 1}`} className="input-thumb-preview" />
-                      <span className="attachment-filename">{img.fileName}</span>
-                      <button
-                        type="button"
-                        onClick={() => setAttachedImages((prev) => prev.filter((_, i) => i !== idx))}
-                        className="attachment-remove-btn"
-                        aria-label={`Remove image ${idx + 1}`}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                  {attachedImages.length < 4 && (
-                    <button
-                      type="button"
-                      className="add-more-images-btn"
-                      onClick={() => fileInputRef.current?.click()}
-                      title="Add another image (up to 4)"
-                    >
-                      <IconPlus size={12} />
-                      <span>Add ({attachedImages.length}/4)</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Attached PDF/Text/Code File Preview */}
-              {attachedFile && (
-                <div className="attached-file-chip-wrapper">
-                  <div className="attachment-indicator-pill">
-                    <IconFileText size={13} />
-                    <span className="attachment-filename">{attachedFile.fileName}</span>
-                    {attachedFile.fileSize ? (
-                      <span className="attachment-filesize">
-                        ({formatFileSize(attachedFile.fileSize)})
-                      </span>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => setAttachedFile(null)}
-                      className="attachment-remove-btn"
-                      aria-label="Remove file"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  {attachedFile.truncationNote && (
-                    <div className="attachment-truncation-note">
-                      {attachedFile.truncationNote}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {fileUploadError && (
-                <div className="attachment-error-note">
-                  <span>{fileUploadError}</span>
-                  <button type="button" onClick={() => setFileUploadError(null)}>✕</button>
-                </div>
-              )}
-
-              {isProcessingFile && (
-                <div className="attachment-indicator-pill">
-                  <span className="attachment-filename">Reading attachment...</span>
-                </div>
-              )}
+              {renderComposerAttachmentArea()}
 
               <div className="chat-input-card-bottom">
                 <div className="input-toolbar-left">
@@ -2363,54 +2801,7 @@ export const ChatScreen: React.FC = () => {
                       <IconPlus size={16} />
                     </button>
 
-                    {isAttachmentMenuOpen && (
-                      <div className="attachment-dropdown-menu">
-                        <button
-                          type="button"
-                          className={`attachment-dropdown-item ${inputMode === "image" ? "active" : ""}`}
-                          onClick={() => {
-                            setInputMode(inputMode === "image" ? "chat" : "image");
-                            setIsAttachmentMenuOpen(false);
-                            textareaRef.current?.focus();
-                          }}
-                        >
-                          <IconImage size={14} />
-                          <span>Create image</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          className="attachment-dropdown-item"
-                          onClick={() => {
-                            setIsAttachmentMenuOpen(false);
-                            if (isGuest) {
-                              setShowGuestLimitModal(true);
-                              return;
-                            }
-                            fileInputRef.current?.click();
-                          }}
-                        >
-                          <IconPaperclip size={14} />
-                          <span>Attach image, PDF or file</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          className={`attachment-dropdown-item ${isWebSearchActive ? "active" : ""}`}
-                          onClick={() => {
-                            if (isGuest) {
-                              setShowGuestLimitModal(true);
-                              return;
-                            }
-                            setIsWebSearchActive(!isWebSearchActive);
-                            setIsAttachmentMenuOpen(false);
-                          }}
-                        >
-                          <IconGlobe size={14} />
-                          <span>Web Search ({isWebSearchActive ? "ON" : "OFF"})</span>
-                        </button>
-                      </div>
-                    )}
+                    {renderAttachmentDropdown(isAttachmentMenuOpen, () => setIsAttachmentMenuOpen(false))}
                   </div>
 
                   {/* Active Web Search Indicator Pill */}
@@ -2584,6 +2975,56 @@ export const ChatScreen: React.FC = () => {
       <VoiceCallModal
         isOpen={isVoiceCallOpen}
         onClose={() => closeOverlay("voiceCall")}
+      />
+
+      {/* Image Editor / "Ask about this part" Sheet (Hardware Back supported via navigation overlay) */}
+      <ImageEditorModal
+        isOpen={
+          isImageEditorOpen &&
+          ((editingImageIndex !== null && !!attachedImages[editingImageIndex]) || !!askPartTarget)
+        }
+        mode={askPartTarget ? "askPart" : "edit"}
+        fileName={
+          askPartTarget
+            ? askPartTarget.fileName
+            : editingImageIndex !== null && attachedImages[editingImageIndex]
+            ? attachedImages[editingImageIndex].fileName
+            : "image.jpg"
+        }
+        sourceUrl={
+          askPartTarget
+            ? askPartTarget.url
+            : editingImageIndex !== null && attachedImages[editingImageIndex]
+            ? attachedImages[editingImageIndex].originalDataUrl
+            : ""
+        }
+        initialEdits={
+          !askPartTarget && editingImageIndex !== null && attachedImages[editingImageIndex]
+            ? attachedImages[editingImageIndex].edits
+            : DEFAULT_IMAGE_EDITS
+        }
+        onClose={() => closeOverlay("imageEditor")}
+        onApplyEdit={
+          editingImageIndex !== null
+            ? (nextEdits) => handleApplyEditorChanges(editingImageIndex, nextEdits)
+            : undefined
+        }
+        onAskAboutPart={askPartTarget ? handleConfirmAskAboutPart : undefined}
+      />
+
+      {/* In-App Camera Capture Modal (Hardware Back supported via navigation overlay) */}
+      <CameraCaptureModal
+        isOpen={isCameraCaptureOpen}
+        onClose={() => {
+          setRetakeTargetIndex(null);
+          closeOverlay("cameraCapture");
+        }}
+        onCaptureFile={async (file) => {
+          const targetIdx = retakeTargetIndex;
+          setRetakeTargetIndex(null);
+          await processIncomingFiles([file], "camera", targetIdx);
+        }}
+        onFallbackSystemCamera={() => cameraInputRef.current?.click()}
       />
 
       {/* Calm Guest Limit / Voice Call Login Modal */}
