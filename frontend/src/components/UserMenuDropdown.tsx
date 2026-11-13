@@ -11,7 +11,6 @@ import {
   IconChevronDown,
   IconFileText,
   IconShield,
-  IconKeyboard,
 } from "./Icons";
 import { translate } from "../i18n/translations";
 import "./UserMenuDropdown.css";
@@ -167,7 +166,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
               <IconSettings size={17} />
               <span>{t("settings")}</span>
             </span>
-            <span className="user-menu-shortcut">Ctrl+Shift+,</span>
           </button>
 
           <button
@@ -254,15 +252,6 @@ export const UserMenuDropdown: React.FC<UserMenuDropdownProps> = ({
               >
                 <IconShield size={15} />
                 <span>{t("privacyPolicy")}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="user-menu-subitem"
-                onClick={() => openTarget("about", "shortcuts")}
-              >
-                <IconKeyboard size={15} />
-                <span>{t("keyboardShortcuts")}</span>
               </button>
             </div>
           )}

@@ -40,7 +40,6 @@ import {
 import { ImageEditorModal, CameraCaptureModal } from "../components/ImageEditorModal";
 import {
   ImageCreationCard,
-  VideoCreationCard,
   SpeechAudioButton,
   speakTextWithPreferences,
 } from "../components/CreationCards";
@@ -57,7 +56,6 @@ import {
   IconMicOff,
   IconVolume,
   IconImage,
-  IconVideo,
   IconFolder,
   IconFileText,
   IconSparkles,
@@ -230,8 +228,8 @@ export const ChatScreen: React.FC = () => {
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
   const [isHomeAttachmentMenuOpen, setIsHomeAttachmentMenuOpen] = useState(false);
 
-  // Creative Studio Mode: "chat" | "image" | "video" | "voice"
-  const [inputMode, setInputMode] = useState<"chat" | "image" | "video" | "voice">("chat");
+  // Mode: "chat" | "image" | "voice"
+  const [inputMode, setInputMode] = useState<"chat" | "image" | "voice">("chat");
   const [isModeDropdownOpen, setIsModeDropdownOpen] = useState(false);
 
   // Voice Interaction States
@@ -1093,13 +1091,12 @@ export const ChatScreen: React.FC = () => {
             createNewChat(activeProjectId);
             setIsMobileMenuOpen(false);
           }}
-          title="New Chat (Ctrl+Shift+O)"
+          title="New Chat"
         >
           <div className="sidebar-nav-btn-left">
             <IconPlus size={16} />
             <span>{t("newChat")}</span>
           </div>
-          <span className="sidebar-nav-shortcut">Ctrl+Shift+O</span>
         </button>
 
         <button
@@ -1868,7 +1865,7 @@ export const ChatScreen: React.FC = () => {
               className="topbar-action-btn"
               onClick={() => openSettings(null)}
               aria-label={t("settings")}
-              title={`${t("settings")} (Ctrl+Shift+,)`}
+              title={t("settings")}
             >
               <IconSettings size={18} />
             </button>
@@ -2068,8 +2065,6 @@ export const ChatScreen: React.FC = () => {
                     placeholder={
                       inputMode === "image"
                         ? "Describe the visual you want to create..."
-                        : inputMode === "video"
-                        ? "Describe the cinematic scene for Video Studio..."
                         : preferences.enterToSend === false
                         ? t("askAnythingCtrlEnter")
                         : t("howCanIHelp")
@@ -2110,17 +2105,14 @@ export const ChatScreen: React.FC = () => {
                         type="button"
                         className="mode-selector-pill"
                         onClick={() => setIsModeDropdownOpen((prev) => !prev)}
-                        title="Select Studio Mode"
+                        title="Select Mode"
                       >
                         {inputMode === "image" && <IconImage size={13} />}
-                        {inputMode === "video" && <IconVideo size={13} />}
                         {inputMode === "voice" && <IconMic size={13} />}
                         {inputMode === "chat" && <IconSparkles size={13} />}
                         <span>
                           {inputMode === "image"
-                            ? "Image Studio"
-                            : inputMode === "video"
-                            ? "Video Studio"
+                            ? "Create image"
                             : inputMode === "voice"
                             ? "Voice Mode"
                             : "Chat"}
@@ -2151,17 +2143,6 @@ export const ChatScreen: React.FC = () => {
                           >
                             <IconImage size={14} />
                             <span>🎨 Image Creation</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={`mode-dropdown-item ${inputMode === "video" ? "active" : ""}`}
-                            onClick={() => {
-                              setInputMode("video");
-                              setIsModeDropdownOpen(false);
-                            }}
-                          >
-                            <IconVideo size={14} />
-                            <span>🎬 Video Creation</span>
                           </button>
                           <button
                             type="button"
@@ -2209,7 +2190,7 @@ export const ChatScreen: React.FC = () => {
                       disabled={(!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile}
                       onClick={handleSend}
                       aria-label="Send message"
-                      title="Send message (Enter)"
+                      title="Send message"
                     >
                       <IconSend size={15} />
                     </button>
@@ -2217,12 +2198,7 @@ export const ChatScreen: React.FC = () => {
                 </div>
               </div>
 
-              {/* Engine Badge */}
-              <div className="home-engine-tag">
-                {t("engineTag")}
-              </div>
-
-              {/* Empty-Home Quick Mode Chips (visible even if starter prompts are off) */}
+              {/* Empty-Home Quick Mode Chips */}
               <div className="home-quick-actions-row">
                 <button
                   type="button"
@@ -2250,78 +2226,6 @@ export const ChatScreen: React.FC = () => {
                   <span>Web search</span>
                 </button>
               </div>
-
-              {/* Recent Artifacts & Starter Creations Section */}
-              {preferences.showStarterPrompts !== false && (
-                <div className="home-artifacts-section">
-                  <div className="artifacts-header">
-                    <span className="artifacts-title">{t("recentCreations")}</span>
-                    <button
-                      type="button"
-                      className="artifacts-view-all"
-                      onClick={() => {
-                        setInputMode("image");
-                        setInputContent("A futuristic cosmic portal glowing in deep violet and silver");
-                      }}
-                    >
-                      {t("viewAll")}
-                    </button>
-                  </div>
-
-                  <div className="artifacts-grid">
-                    {/* Artifact Card 1: Create Image Preset */}
-                    <div
-                      className="artifact-card"
-                      onClick={() => {
-                        setInputMode("image");
-                        setInputContent("Photorealistic sleek sports car cruising a rain-slicked neon city boulevard at night");
-                      }}
-                    >
-                      <div
-                        className="artifact-card-preview"
-                        style={{ background: "linear-gradient(135deg, #1b1035 0%, #3b1764 55%, #0e172a 100%)" }}
-                      >
-                        <IconImage size={28} style={{ color: "#e9d5ff", opacity: 0.92 }} />
-                      </div>
-                      <div className="artifact-card-title">Create Image Studio</div>
-                      <div className="artifact-card-time">Multiple styles &amp; ratios</div>
-                    </div>
-
-                    {/* Artifact Card 2: Video Studio Preset */}
-                    <div
-                      className="artifact-card"
-                      onClick={() => {
-                        setInputMode("video");
-                        setInputContent("Cinematic glowing purple gravitational singularity particle vortex");
-                      }}
-                    >
-                      <div className="artifact-card-preview" style={{ background: "radial-gradient(circle, #581c87 0%, #0c0c0e 80%)" }}>
-                        <IconVideo size={28} style={{ color: "#c084fc", opacity: 0.9 }} />
-                      </div>
-                      <div className="artifact-card-title">Orbital Singularity Loop</div>
-                      <div className="artifact-card-time">Video Studio • 4K 60FPS</div>
-                    </div>
-
-                    {/* Artifact Card 3: Memory & Assistant Prompt */}
-                    <div
-                      className="artifact-card"
-                      onClick={() => {
-                        setInputMode("chat");
-                        setInputContent("Give me a strategic overview of our autonomous AI capabilities and project roadmap");
-                      }}
-                    >
-                      <div className="artifact-card-preview">
-                        <div className="artifact-doc-preview">
-                          <strong>AUTONEXIS Assistant</strong>
-                          <p>Self-learning, cross-chat persistent memory, native speech synthesis and studio multi-modal rendering engine.</p>
-                        </div>
-                      </div>
-                      <div className="artifact-card-title">System Architecture Overview</div>
-                      <div className="artifact-card-time">Prompt & Knowledge • Just now</div>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
           ) : (
             /* ==============================================================
@@ -2438,15 +2342,7 @@ export const ChatScreen: React.FC = () => {
                             />
                           )}
 
-                          {/* 2. Video Studio Card if mediaType is video */}
-                          {msg.mediaType === "video" && (
-                            <VideoCreationCard
-                              prompt={msg.mediaPrompt || msg.content}
-                              duration={msg.videoDuration || "00:05"}
-                            />
-                          )}
-
-                          {/* 3. Text Content: Assistant or User (with inline Edit mode for last user msg) */}
+                          {/* 2. Text Content: Assistant or User (with inline Edit mode for last user msg) */}
                           {!isUser && msg.content && msg.status !== "error" && (
                             <div className="message-text-content">
                               <MarkdownRenderer content={msg.content} />
@@ -2776,8 +2672,6 @@ export const ChatScreen: React.FC = () => {
                 placeholder={
                   inputMode === "image"
                     ? "Describe the visual you want to create..."
-                    : inputMode === "video"
-                    ? "Render a cinematic scene with Video Studio..."
                     : preferences.enterToSend === false
                     ? t("askAnythingCtrlEnter")
                     : t("askAnythingEnter")
@@ -2818,17 +2712,14 @@ export const ChatScreen: React.FC = () => {
                       type="button"
                       className="mode-selector-pill"
                       onClick={() => setIsModeDropdownOpen((prev) => !prev)}
-                      title="Select Studio Mode"
+                      title="Select Mode"
                     >
                       {inputMode === "image" && <IconImage size={13} />}
-                      {inputMode === "video" && <IconVideo size={13} />}
                       {inputMode === "voice" && <IconMic size={13} />}
                       {inputMode === "chat" && <IconSparkles size={13} />}
                       <span>
                         {inputMode === "image"
-                          ? "Image Studio"
-                          : inputMode === "video"
-                          ? "Video Studio"
+                          ? "Create image"
                           : inputMode === "voice"
                           ? "Voice Mode"
                           : "Chat"}
@@ -2859,17 +2750,6 @@ export const ChatScreen: React.FC = () => {
                         >
                           <IconImage size={14} />
                           <span>🎨 Image Creation</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={`mode-dropdown-item ${inputMode === "video" ? "active" : ""}`}
-                          onClick={() => {
-                            setInputMode("video");
-                            setIsModeDropdownOpen(false);
-                          }}
-                        >
-                          <IconVideo size={14} />
-                          <span>🎬 Video Creation</span>
                         </button>
                         <button
                           type="button"
@@ -2917,7 +2797,7 @@ export const ChatScreen: React.FC = () => {
                     disabled={(!inputContent.trim() && attachedImages.length === 0 && !attachedFile) || isSending || isProcessingFile}
                     onClick={handleSend}
                     aria-label="Send message"
-                    title={preferences.enterToSend === false ? "Send (Ctrl+Enter)" : "Send (Enter)"}
+                    title="Send message"
                   >
                     <IconSend size={15} />
                   </button>

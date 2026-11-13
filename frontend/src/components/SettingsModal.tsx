@@ -133,10 +133,6 @@ const FAQ_ITEMS = [
     q: "How can I export or erase my data?",
     a: "Go to Privacy to download all chats as JSON, delete all chats, delete all memories, or clear all cached data stored on this browser.",
   },
-  {
-    q: "Which keyboard shortcuts can I use?",
-    a: "Use Ctrl+K to search chats, Ctrl+Shift+O for a new chat, Ctrl+Shift+, to open Settings, and Esc to close dialogs. You can also toggle whether Enter sends or inserts a new line under Capabilities.",
-  },
 ];
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -1440,7 +1436,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="settings-row-info">
                   <span className="settings-item-title">{t("enterToSendLabel")}</span>
                   <span className="settings-item-desc">
-                    When on, Enter sends and Shift+Enter adds a newline. Turn off to send with Ctrl+Enter.
+                    When on, pressing Enter sends the message. Turn off to insert new lines on Enter.
                   </span>
                 </div>
                 <button
@@ -1467,25 +1463,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   aria-label={t("autoScrollLabel")}
                   className={`settings-toggle-btn ${preferences.autoScroll !== false ? "active" : ""}`}
                   onClick={() => updatePreferences({ autoScroll: preferences.autoScroll === false })}
-                >
-                  <span className="settings-toggle-knob" />
-                </button>
-              </div>
-
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <span className="settings-item-title">{t("starterPromptsLabel")}</span>
-                  <span className="settings-item-desc">Show suggested prompts and studio presets on the empty home view.</span>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={preferences.showStarterPrompts !== false}
-                  aria-label={t("starterPromptsLabel")}
-                  className={`settings-toggle-btn ${preferences.showStarterPrompts !== false ? "active" : ""}`}
-                  onClick={() =>
-                    updatePreferences({ showStarterPrompts: preferences.showStarterPrompts === false })
-                  }
                 >
                   <span className="settings-toggle-knob" />
                 </button>
@@ -2199,7 +2176,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </Button>
               </div>
 
-              <div className="settings-row">
+              <div className="settings-row settings-shortcuts-about-row">
                 <div className="settings-row-info">
                   <span className="settings-item-title">{t("keyboardShortcuts")}</span>
                   <span className="settings-item-desc">Fast navigation and sending shortcuts.</span>
@@ -2282,7 +2259,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
               <div className="settings-shortcuts-list">
                 <div className="settings-shortcut-row">
-                  <span>Search chats &amp; messages</span>
+                  <span>Search chats</span>
                   <kbd className="settings-kbd">Ctrl + K</kbd>
                 </div>
                 <div className="settings-shortcut-row">

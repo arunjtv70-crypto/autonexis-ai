@@ -228,7 +228,7 @@ export interface ChatsContextType {
   setIsWebSearchActive: (active: boolean) => void;
   sendMessage: (
     content: string,
-    mode?: "chat" | "image" | "video" | "voice",
+    mode?: "chat" | "image" | "voice",
     attachment?: AttachmentPayload | null,
     imageOptions?: { style?: string; aspect?: string; seed?: number; previousPrompt?: string; isEdit?: boolean }
   ) => Promise<void>;
@@ -3157,7 +3157,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // -----------------------------------------------------------------------
   const sendMessage = async (
     content: string,
-    mode: "chat" | "image" | "video" | "voice" = "chat",
+    mode: "chat" | "image" | "voice" = "chat",
     attachment?: AttachmentPayload | null,
     imageOptions?: { style?: string; aspect?: string; seed?: number; previousPrompt?: string; isEdit?: boolean }
   ) => {
@@ -3181,9 +3181,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     const isExplicitImageMode = mode === "image" || !!imageOptions?.isEdit;
-    const isVideoRequest =
-      mode === "video" ||
-      /(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)/i.test(trimmed);
 
     const { extractedName, newFact } = extractUserMemory(trimmed);
 
@@ -3343,50 +3340,6 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
         setIsSending(false);
       }
-      return;
-    }
-
-    if (isVideoRequest) {
-      const videoPrompt = trimmed
-        .replace(/(?:create|generate|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)?/i, "")
-        .replace(/(?:video)\s+(?:banao|karo|bana\s+do)/i, "")
-        .trim() || trimmed;
-
-      setTimeout(() => {
-        const assistantMsg: MessageItem = {
-          id: "ast_" + Date.now(),
-          role: "assistant",
-          content: `Here is your cinematic 4K video rendering for: "${videoPrompt}"`,
-          mediaType: "video",
-          mediaPrompt: videoPrompt,
-          videoDuration: "00:05",
-          created_at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        };
-
-        setChats((prev) =>
-          prev.map((c) => {
-            if (c.id === capturedChatId) {
-              return { ...c, messages: [...c.messages, assistantMsg] };
-            }
-            return c;
-          })
-        );
-        setIsSending(false);
-
-        if (!isTemp && isAuthenticated && currentUid && !savedMsgIdsRef.current.has(assistantMsg.id)) {
-          savedMsgIdsRef.current.add(assistantMsg.id);
-          backgroundSave(
-            {
-              uid: currentUid,
-              chatId: capturedChatId,
-              title: autoTitle,
-              projectId: chatProjectId,
-              messages: [{ id: assistantMsg.id, role: assistantMsg.role, content: assistantMsg.content }],
-            },
-            setFirestoreError
-          );
-        }
-      }, 1200);
       return;
     }
 

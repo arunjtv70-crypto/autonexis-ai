@@ -1326,3 +1326,11 @@ input:checked + .settings-switch-slider:before {
   }
 }
 
+/* Touch device hiding for desktop-only shortcut hints */
+@media (hover: none) and (pointer: coarse) {
+  .settings-shortcuts-about-row {
+    display: none !important;
+  }
+}
+
+

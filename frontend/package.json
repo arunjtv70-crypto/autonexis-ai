@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "oxlint",
+    "test": "node scripts/audit-placeholders.mjs",
+    "audit:placeholders": "node scripts/audit-placeholders.mjs",
     "preview": "vite preview",
     "check:assetlinks": "node ../scripts/check-assetlinks.mjs"
   },

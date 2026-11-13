@@ -142,12 +142,6 @@
   gap: 10px;
 }
 
-.sidebar-nav-shortcut {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  font-family: inherit;
-}
-
 /* Recents Header */
 .sidebar-recents-header {
   display: flex;
@@ -465,13 +459,6 @@
   text-align: center;
 }
 
-.home-orbital-icon {
-  width: 36px;
-  height: 36px;
-  object-fit: contain;
-  filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.4));
-}
-
 .home-greeting-title {
   font-family: var(--font-brand);
   font-size: clamp(1.45rem, 3.2vw, 1.95rem);
@@ -717,105 +704,6 @@
   width: 100%;
 }
 
-/* -------------------------------------------
-   RECENT ARTIFACTS / CREATIONS SECTION
-------------------------------------------- */
-.home-artifacts-section {
-  width: 100%;
-  margin-top: 2.5rem;
-}
-
-.artifacts-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.85rem;
-}
-
-.artifacts-title {
-  font-size: 0.86rem;
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
-.artifacts-view-all {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: color var(--transition-fast);
-}
-
-.artifacts-view-all:hover {
-  color: var(--accent);
-}
-
-.artifacts-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
-  width: 100%;
-}
-
-.artifact-card {
-  background-color: var(--surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: 0.9rem;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  text-align: left;
-}
-
-.artifact-card:hover {
-  border-color: var(--accent);
-  background-color: var(--surface-raised);
-  transform: translateY(-2px);
-}
-
-.artifact-card-preview {
-  height: 90px;
-  background-color: var(--surface-raised);
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.artifact-img-preview {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.artifact-doc-preview {
-  font-size: 0.65rem;
-  color: var(--text-muted);
-  padding: 8px;
-  line-height: 1.4;
-  overflow: hidden;
-  max-height: 100%;
-}
-
-.artifact-card-title {
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.artifact-card-time {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-}
 
 /* -------------------------------------------
    CONVERSATION MESSAGE LIST (WHEN CHATTING)
@@ -2179,9 +2067,6 @@
   }
   .chat-home-container {
     padding: 1rem 0.75rem 2rem;
-  }
-  .artifacts-grid {
-    grid-template-columns: 1fr;
   }
   .pwa-install-banner {
     font-size: 0.74rem;

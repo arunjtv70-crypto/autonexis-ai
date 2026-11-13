@@ -32,7 +32,7 @@ const FEATURE_CARDS = [
   {
     key: "images" as const,
     icon: IconImage,
-    title: "Image Studio",
+    title: "Image Creation",
     description:
       "Describe a scene or concept naturally in English, Hindi, or Hinglish to generate private images stored directly in your conversation.",
   },
