@@ -313,7 +313,7 @@ export function searchChatHistoryBM25(
   queryText: string,
   options?: { topK?: number; hasRecallCue?: boolean }
 ): RecalledSnippet[] {
-  if (!messages || messages.length === 0 || !queryText.trim()) return [];
+  if (!messages || messages.length === 0 || !queryText || typeof queryText !== "string" || !queryText.trim()) return [];
 
   // Limit search window to latest 500 messages to prevent excessive memory overhead
   const searchPool = messages.slice(-500);
