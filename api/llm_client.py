@@ -392,18 +392,43 @@ class LLMClient:
                 ordered.append(m)
         return ordered
 
-    def _get_active_model(self, messages: List[Dict[str, Any]]) -> str:
-        """
-        Dynamically picks:
-        - Vision model if latest message contains an image.
-        - Think/Reasoning model if messages contain a mathematical/quantitative inquiry.
-        - Default text model otherwise.
-        """
+    def _get_candidate_models(self, messages: List[Dict[str, Any]]) -> List[str]:
+        """Ordered deduplicated list of candidate models with resilient fallback chain."""
         if has_image_content(messages):
-            return self._get_vision_models()[0]
+            return self._get_vision_models()
+
+        candidates: List[str] = []
         if is_math_request(messages):
-            return os.environ.get("LLM_MODEL_THINK") or self.model_think or "openai/gpt-oss-120b"
-        return os.environ.get("LLM_MODEL") or self.model
+            think = (os.environ.get("LLM_MODEL_THINK") or self.model_think or "").strip()
+            if think:
+                candidates.append(think)
+
+        primary = (os.environ.get("LLM_MODEL") or self.model or "").strip()
+        if primary:
+            candidates.append(primary)
+
+        env_fallbacks = (os.environ.get("LLM_FALLBACK_MODELS") or "").strip()
+        if env_fallbacks:
+            for item in env_fallbacks.split(","):
+                m = item.strip()
+                if m:
+                    candidates.append(m)
+
+        # Standard resilient fallbacks for OpenAI-compatible gateways
+        candidates.extend(["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
+
+        seen = set()
+        ordered: List[str] = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                ordered.append(m)
+        return ordered or ["qwen/qwen3.8-27b"]
+
+    def _get_active_model(self, messages: List[Dict[str, Any]]) -> str:
+        """Dynamically picks the active primary model."""
+        candidates = self._get_candidate_models(messages)
+        return candidates[0] if candidates else (os.environ.get("LLM_MODEL") or self.model or "qwen/qwen3.8-27b")
 
     def _prepare_messages(
         self,
@@ -779,7 +804,8 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        active_model = self._get_active_model(messages)
+        models_to_try = self._get_candidate_models(messages)
+        active_model = models_to_try[0]
         is_vision = has_image_content(messages)
         vision_image_count = _count_images_in_messages(messages) if is_vision else 0
         is_math = is_math_request(messages)
@@ -970,7 +996,7 @@ class LLMClient:
         # Optional Think Mode Self-Check for Images/Complex Reasoning
         enable_self_check = getattr(settings, "llm_enable_think_self_check", True)
         run_self_check = enable_self_check and not is_guest and not voice and is_vision
-        models_to_try = self._get_vision_models() if is_vision else [active_model]
+        models_to_try = self._get_candidate_models(messages)
         payload_bytes = _estimate_payload_bytes({"messages": conversation})
 
         if run_self_check:
@@ -1104,7 +1130,7 @@ class LLMClient:
                             last_body = err_bytes.decode("utf-8", errors="ignore")
                             last_exc = None
                             logger.error(f"[AUTONEXIS LLM STREAM ERROR] Attempt {attempt_idx + 1} Status {response.status_code}: {last_body[:400]}")
-                            if is_vision and attempt_idx + 1 < len(models_to_try):
+                            if attempt_idx + 1 < len(models_to_try):
                                 continue
                             if response.status_code == 429 and voice:
                                 yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': 'Voice is busy, please try again shortly'}, ensure_ascii=False)}\n\n"
@@ -1146,7 +1172,7 @@ class LLMClient:
                     last_exc = e
                     last_status = None
                     logger.error(f"[AUTONEXIS LLM STREAM EXCEPTION] Attempt {attempt_idx + 1}: {type(e).__name__}")
-                    if is_vision and attempt_idx + 1 < len(models_to_try):
+                    if attempt_idx + 1 < len(models_to_try):
                         continue
 
         real_err = _format_safe_upstream_error(last_status, last_body, is_vision=is_vision, exc=last_exc)
@@ -1232,7 +1258,8 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        active_model = self._get_active_model(messages)
+        models_to_try = self._get_candidate_models(messages)
+        active_model = models_to_try[0]
         is_vision = has_image_content(messages)
         vision_image_count = _count_images_in_messages(messages) if is_vision else 0
         is_math = is_math_request(messages)
@@ -1336,7 +1363,7 @@ class LLMClient:
             is_math=False,
             voice=voice,
         )
-        models_to_try = self._get_vision_models() if is_vision else [active_model]
+        models_to_try = self._get_candidate_models(messages)
         payload_bytes = _estimate_payload_bytes({"messages": conversation})
         last_status: Optional[int] = None
         last_body = ""
