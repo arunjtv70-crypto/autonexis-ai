@@ -183,6 +183,26 @@ _CODE_OR_TABLE_RE = re.compile(
     re.I,
 )
 
+_CANNED_BOILERPLATE_RE = re.compile(
+    r"\b(main yahan (?:help|madad) ke liye hoon.*?madad karunga|"
+    r"main yahan aapki sahayata ke liye upasthit hoon|"
+    r"i am here to help you out.*?focus on what you need|"
+    r"as an ai (?:language model|assistant))\b",
+    re.I
+)
+
+def _is_canned_or_repetitive(candidate: str, prev_assistant_text: str = "") -> bool:
+    if not candidate:
+        return True
+    if _CANNED_BOILERPLATE_RE.search(candidate):
+        return True
+    if prev_assistant_text:
+        c1 = re.sub(r"\s+", " ", candidate.lower()).strip()
+        c2 = re.sub(r"\s+", " ", prev_assistant_text.lower()).strip()
+        if c1 and c1 == c2:
+            return True
+    return False
+
 
 def _get_tavily_key() -> str:
     return (os.environ.get("TAVILY_API_KEY") or getattr(settings, "tavily_api_key", "") or "").strip()
@@ -587,26 +607,6 @@ class LLMClient:
             full_system += "\n\nNOTE: You MUST accurately remember and reference user details and ALWAYS match the user's language."
 
         return [{"role": "system", "content": full_system}] + user_and_assistant
-
-_CANNED_BOILERPLATE_RE = re.compile(
-    r"\b(main yahan (?:help|madad) ke liye hoon.*?madad karunga|"
-    r"main yahan aapki sahayata ke liye upasthit hoon|"
-    r"i am here to help you out.*?focus on what you need|"
-    r"as an ai (?:language model|assistant))\b",
-    re.I
-)
-
-def _is_canned_or_repetitive(candidate: str, prev_assistant_text: str = "") -> bool:
-    if not candidate:
-        return True
-    if _CANNED_BOILERPLATE_RE.search(candidate):
-        return True
-    if prev_assistant_text:
-        c1 = re.sub(r"\s+", " ", candidate.lower()).strip()
-        c2 = re.sub(r"\s+", " ", prev_assistant_text.lower()).strip()
-        if c1 and c1 == c2:
-            return True
-    return False
 
     async def _sanitize_response(
         self,
