@@ -505,19 +505,26 @@ class LLMClient:
                 c = extract_text_from_content(content).strip()
                 if c:
                     extra_system_context.append(c)
+            elif role == "assistant":
+                text_val = extract_text_from_content(content).strip()
+                # Skip empty placeholder messages or failed server error turns from model history
+                if not text_val or re.match(r"^Server returned (?:HTTP )?\d+", text_val, re.I):
+                    continue
+                user_and_assistant.append({
+                    "role": "assistant",
+                    "content": content
+                })
+                prev_assistant_text = text_val
             else:
+                text_val = extract_text_from_content(content).strip()
+                # Skip blank user turns without content/attachments
+                if not text_val and not (isinstance(content, list) and content):
+                    continue
                 user_and_assistant.append({
                     "role": role,
                     "content": content
                 })
-                if role == "user":
-                    text_val = extract_text_from_content(content).strip()
-                    if text_val:
-                        last_user_text = text_val
-                elif role == "assistant":
-                    text_val = extract_text_from_content(content).strip()
-                    if text_val:
-                        prev_assistant_text = text_val
+                last_user_text = text_val
 
         # Anti-Repetition Guard: actively prevent the assistant from repeating its previous response or canned boilerplate
         if prev_assistant_text:

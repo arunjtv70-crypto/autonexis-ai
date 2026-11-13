@@ -2,6 +2,9 @@ import json
 import sys
 import os
 import time
+import logging
+
+logger = logging.getLogger("autonexis.backend")
 
 backend_dir = os.path.abspath(os.path.dirname(__file__))
 if backend_dir not in sys.path:
@@ -217,21 +220,31 @@ async def chat_direct(
     uid_str = "guest" if is_guest else str(current_user.id)
     is_debug = bool(req.debug or request.query_params.get("debug") == "1")
 
-    result = await llm_client.chat_non_stream(
-        messages_payload,
-        req.user_memory,
-        user_context=req.user_context,
-        project_context=req.project_context,
-        relevant_past_chats=req.relevant_past_chats if not is_guest else None,
-        custom_style=req.custom_style if not is_guest else None,
-        chat_context=req.chat_context,
-        is_guest=is_guest,
-        voice=bool(req.voice),
-        uid=uid_str,
-        router_result=router_result,
-        debug=is_debug,
-    )
-    return JSONResponse(content=result, headers={"X-Autonexis-Router": json.dumps(safe_router)})
+    try:
+        result = await llm_client.chat_non_stream(
+            messages_payload,
+            req.user_memory,
+            user_context=req.user_context,
+            project_context=req.project_context,
+            relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+            custom_style=req.custom_style if not is_guest else None,
+            chat_context=req.chat_context,
+            is_guest=is_guest,
+            voice=bool(req.voice),
+            uid=uid_str,
+            router_result=router_result,
+            debug=is_debug,
+        )
+        return JSONResponse(content=result, headers={"X-Autonexis-Router": json.dumps(safe_router)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[AUTONEXIS CHAT DIRECT EXCEPTION] {exc}")
+        safe_fallback = "Voice is busy, please try again shortly" if req.voice else "I am having trouble connecting right now. Please try again in a moment."
+        return JSONResponse(
+            content={"reply": safe_fallback},
+            headers={"X-Autonexis-Router": json.dumps(safe_router)}
+        )
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
@@ -279,6 +292,14 @@ async def chat_stream_endpoint(
     if not req.messages:
         raise HTTPException(status_code=400, detail="कम से कम एक संदेश आवश्यक है।")
 
+    max_vision_body_bytes = int(3.2 * 1024 * 1024)
+    content_length_hdr = request.headers.get("content-length")
+    if content_length_hdr and content_length_hdr.isdigit() and int(content_length_hdr) > max_vision_body_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail="Request size is above the 3 MB vision budget. Please crop or attach fewer images.",
+        )
+
     messages_payload = [m.model_dump() for m in req.messages]
     last_text = get_last_user_text(messages_payload)
     last_has_upload = has_image_content(messages_payload[-1:]) if messages_payload else False
@@ -292,24 +313,38 @@ async def chat_stream_endpoint(
     uid_str = "guest" if is_guest else str(current_user.id)
     is_debug = bool(req.debug or request.query_params.get("debug") == "1")
 
+    async def safe_stream_generator():
+        try:
+            async for chunk in llm_client.chat_stream(
+                messages_payload,
+                req.user_memory,
+                user_context=req.user_context,
+                project_context=req.project_context,
+                relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+                custom_style=req.custom_style if not is_guest else None,
+                chat_context=req.chat_context,
+                is_guest=is_guest,
+                voice=bool(req.voice),
+                uid=uid_str,
+                router_result=router_result,
+                image_style=req.image_style,
+                image_aspect=req.image_aspect,
+                image_seed=req.image_seed,
+                debug=is_debug,
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.exception(f"[AUTONEXIS CHAT STREAM UNHANDLED EXCEPTION] {exc}")
+            err_msg = (
+                "Voice is busy, please try again shortly"
+                if req.voice
+                else "I am having trouble connecting right now. Please try again in a moment."
+            )
+            yield f"data: {json.dumps({'error': True, 'content': err_msg}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
     return StreamingResponse(
-        llm_client.chat_stream(
-            messages_payload,
-            req.user_memory,
-            user_context=req.user_context,
-            project_context=req.project_context,
-            relevant_past_chats=req.relevant_past_chats if not is_guest else None,
-            custom_style=req.custom_style if not is_guest else None,
-            chat_context=req.chat_context,
-            is_guest=is_guest,
-            voice=bool(req.voice),
-            uid=uid_str,
-            router_result=router_result,
-            image_style=req.image_style,
-            image_aspect=req.image_aspect,
-            image_seed=req.image_seed,
-            debug=is_debug,
-        ),
+        safe_stream_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

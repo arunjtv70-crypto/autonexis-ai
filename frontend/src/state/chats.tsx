@@ -3170,8 +3170,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const errMsg = typeof streamErr?.message === "string" ? streamErr.message : "";
             const isHardError = Boolean(errMsg && !/failed to fetch|networkerror|load failed/i.test(errMsg));
             if (isHardError) {
-              flushDisplay(errMsg);
-              updateMessageInChat(capturedChatId, assistantMsgId, { errorMessage: errMsg });
+              const friendly = /Server returned (?:HTTP )?5\d\d/i.test(errMsg)
+                ? "I am having trouble connecting right now. Please try again in a moment."
+                : errMsg;
+              flushDisplay(friendly);
+              updateMessageInChat(capturedChatId, assistantMsgId, { errorMessage: friendly });
             } else {
               try {
                 const reply = await postChatMessage(
@@ -3194,7 +3197,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 await completeTextReply(reply);
               } catch (fallbackErr: any) {
                 const msg = fallbackErr?.message || "Could not complete request.";
-                flushDisplay(msg);
+                const friendly = /Server returned (?:HTTP )?5\d\d/i.test(msg)
+                  ? "I am having trouble connecting right now. Please try again in a moment."
+                  : msg;
+                flushDisplay(friendly);
+                updateMessageInChat(capturedChatId, assistantMsgId, { errorMessage: friendly });
               }
             }
           } else {
@@ -3516,10 +3523,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }));
 
     const memoryPrompt = buildMemoryPrompt(trimmed, targetChatId, extractedName, newFact, isTemp);
-    const historyPayload: ChatMessagePayload[] = recentMessages.map((m) => ({
-      role: m.role,
-      content: m.fullPayloadContent || m.content,
-    }));
+    const historyPayload: ChatMessagePayload[] = recentMessages
+      .filter((m) => {
+        if (m.errorMessage) return false;
+        const txt = typeof m.content === "string" ? m.content.trim() : "";
+        if (m.role === "assistant" && (!txt || /^Server returned (?:HTTP )?\d+/i.test(txt))) return false;
+        return true;
+      })
+      .map((m) => ({
+        role: m.role,
+        content: m.fullPayloadContent || m.content,
+      }));
 
     if (attachedImages.length > 0) {
       const qrNotes: string[] = [];
@@ -3740,10 +3754,17 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const existingMsgs = currentChat?.messages || [];
     const historyPayload: ChatMessagePayload[] = [
-      ...existingMsgs.map((m) => ({
-        role: m.role,
-        content: m.fullPayloadContent || m.content,
-      })),
+      ...existingMsgs
+        .filter((m) => {
+          if (m.errorMessage) return false;
+          const txt = typeof m.content === "string" ? m.content.trim() : "";
+          if (m.role === "assistant" && (!txt || /^Server returned (?:HTTP )?\d+/i.test(txt))) return false;
+          return true;
+        })
+        .map((m) => ({
+          role: m.role,
+          content: m.fullPayloadContent || m.content,
+        })),
       { role: "user", content: trimmed },
     ];
 

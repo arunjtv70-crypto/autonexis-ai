@@ -2,6 +2,9 @@ import json
 import sys
 import os
 import time
+import logging
+
+logger = logging.getLogger("autonexis.api")
 
 api_dir = os.path.abspath(os.path.dirname(__file__))
 if api_dir not in sys.path:
@@ -228,21 +231,31 @@ async def chat_direct(
     uid_str = "guest" if is_guest else str(current_user.id)
     is_debug = bool(req.debug or request.query_params.get("debug") == "1")
 
-    result = await llm_client.chat_non_stream(
-        messages_payload,
-        req.user_memory,
-        user_context=req.user_context,
-        project_context=req.project_context,
-        relevant_past_chats=req.relevant_past_chats if not is_guest else None,
-        custom_style=req.custom_style if not is_guest else None,
-        chat_context=req.chat_context,
-        is_guest=is_guest,
-        voice=bool(req.voice),
-        uid=uid_str,
-        router_result=router_result,
-        debug=is_debug,
-    )
-    return JSONResponse(content=result, headers={"X-Autonexis-Router": json.dumps(safe_router)})
+    try:
+        result = await llm_client.chat_non_stream(
+            messages_payload,
+            req.user_memory,
+            user_context=req.user_context,
+            project_context=req.project_context,
+            relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+            custom_style=req.custom_style if not is_guest else None,
+            chat_context=req.chat_context,
+            is_guest=is_guest,
+            voice=bool(req.voice),
+            uid=uid_str,
+            router_result=router_result,
+            debug=is_debug,
+        )
+        return JSONResponse(content=result, headers={"X-Autonexis-Router": json.dumps(safe_router)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[AUTONEXIS CHAT DIRECT EXCEPTION] {exc}")
+        safe_fallback = "Voice is busy, please try again shortly" if req.voice else "I am having trouble connecting right now. Please try again in a moment."
+        return JSONResponse(
+            content={"reply": safe_fallback},
+            headers={"X-Autonexis-Router": json.dumps(safe_router)}
+        )
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
@@ -311,24 +324,38 @@ async def chat_stream_endpoint(
     uid_str = "guest" if is_guest else str(current_user.id)
     is_debug = bool(req.debug or request.query_params.get("debug") == "1")
 
+    async def safe_stream_generator():
+        try:
+            async for chunk in llm_client.chat_stream(
+                messages_payload,
+                req.user_memory,
+                user_context=req.user_context,
+                project_context=req.project_context,
+                relevant_past_chats=req.relevant_past_chats if not is_guest else None,
+                custom_style=req.custom_style if not is_guest else None,
+                chat_context=req.chat_context,
+                is_guest=is_guest,
+                voice=bool(req.voice),
+                uid=uid_str,
+                router_result=router_result,
+                image_style=req.image_style,
+                image_aspect=req.image_aspect,
+                image_seed=req.image_seed,
+                debug=is_debug,
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.exception(f"[AUTONEXIS CHAT STREAM UNHANDLED EXCEPTION] {exc}")
+            err_msg = (
+                "Voice is busy, please try again shortly"
+                if req.voice
+                else "I am having trouble connecting right now. Please try again in a moment."
+            )
+            yield f"data: {json.dumps({'error': True, 'content': err_msg}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
     return StreamingResponse(
-        llm_client.chat_stream(
-            messages_payload,
-            req.user_memory,
-            user_context=req.user_context,
-            project_context=req.project_context,
-            relevant_past_chats=req.relevant_past_chats if not is_guest else None,
-            custom_style=req.custom_style if not is_guest else None,
-            chat_context=req.chat_context,
-            is_guest=is_guest,
-            voice=bool(req.voice),
-            uid=uid_str,
-            router_result=router_result,
-            image_style=req.image_style,
-            image_aspect=req.image_aspect,
-            image_seed=req.image_seed,
-            debug=is_debug,
-        ),
+        safe_stream_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
