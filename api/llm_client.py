@@ -477,6 +477,7 @@ class LLMClient:
 
         user_and_assistant = []
         last_user_text = ""
+        prev_assistant_text = ""
         for msg in trimmed_messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
@@ -493,6 +494,66 @@ class LLMClient:
                     text_val = extract_text_from_content(content).strip()
                     if text_val:
                         last_user_text = text_val
+                elif role == "assistant":
+                    text_val = extract_text_from_content(content).strip()
+                    if text_val:
+                        prev_assistant_text = text_val
+
+        # Anti-Repetition Guard: actively prevent the assistant from repeating its previous response or canned boilerplate
+        if prev_assistant_text:
+            clean_prev = re.sub(r"<think>[\s\S]*?</think>", "", prev_assistant_text).strip()
+            first_sentence = clean_prev.split("\n")[0][:140].strip()
+            if first_sentence:
+                extra_system_context.append(
+                    f"[CONVERSATIONAL VARIETY & ANTI-REPETITION MANDATE]:\n"
+                    f"In your previous turn, you said: \"{first_sentence}\"\n"
+                    "You MUST NOT repeat that sentence, phrasing, or sentiment. "
+                    "Provide a completely fresh, natural response that directly addresses what the user just said. "
+                    "Do NOT use robotic customer-support clichés ('madad ke liye yahan hoon', etc.)."
+                )
+
+        # Conversational intent & tone matching guidelines
+        if last_user_text:
+            lower_last = last_user_text.lower().strip()
+            is_playful_banter = bool(re.search(
+                r"\b(chal\s+be|abe\s+saale?|laud[ae]|lawd[ae]|chutiye?|kya\s+be|gandu|bakchodi|chal\s+nikal)\b",
+                lower_last,
+                re.I
+            ))
+            is_playful_challenge = bool(re.search(
+                r"\b(nahi\s+btai|nahi\s+bataya|kya\s+kar\s+lega|tu\s+kya\s+karega|what\s+will\s+you\s+do)\b",
+                lower_last,
+                re.I
+            ))
+            is_casual_greeting = bool(re.search(
+                r"\b(or\s+bhai|aur\s+bhai|kya\s+haal|kya\s+haal\s+chal|kaise\s+ho|kaisa\s+hai|kya\s+chal\s+raha\s+hai|sup|what'?s\s+up|sab\s+kaisa\s+hai)\b",
+                lower_last,
+                re.I
+            ))
+
+            if is_playful_banter:
+                extra_system_context.append(
+                    "[CASUAL BANTER & SLANG GUIDELINE]:\n"
+                    "The user used informal colloquial slang or friendly teasing. "
+                    "Respond with relaxed, clever wit, effortless good humor, and camaraderie like a sharp, chill friend. "
+                    "NEVER act shocked, offended, preachy, or robotic. "
+                    "NEVER give a customer-care boundary line or say 'madad ke liye yahan hoon'. "
+                    "Do NOT use profanity or vulgar words yourself, but match the playful vibe naturally."
+                )
+            elif is_playful_challenge:
+                extra_system_context.append(
+                    "[PLAYFUL CHALLENGE GUIDELINE]:\n"
+                    "The user is playfully challenging or teasing you ('nahi btai to kya kar lega mera'). "
+                    "Respond with lighthearted, clever self-awareness (you are on a screen, you can't force anything, and you are totally cool with whatever they decide). "
+                    "Zero ego, zero defensiveness, zero robotic customer-support lecturing."
+                )
+            elif is_casual_greeting:
+                extra_system_context.append(
+                    "[CASUAL GREETING GUIDELINE]:\n"
+                    "The user is casually saying hello or checking in. "
+                    "Respond warmly, naturally, and concisely like a good friend. "
+                    "DO NOT attach any corporate sign-off (e.g. do NOT say 'madad ke liye yahan hoon', 'batao kya help chahiye', 'how can I assist you today')."
+                )
 
         # Dynamic Language Matching Directive
         if last_user_text:
@@ -527,6 +588,26 @@ class LLMClient:
 
         return [{"role": "system", "content": full_system}] + user_and_assistant
 
+_CANNED_BOILERPLATE_RE = re.compile(
+    r"\b(main yahan (?:help|madad) ke liye hoon.*?madad karunga|"
+    r"main yahan aapki sahayata ke liye upasthit hoon|"
+    r"i am here to help you out.*?focus on what you need|"
+    r"as an ai (?:language model|assistant))\b",
+    re.I
+)
+
+def _is_canned_or_repetitive(candidate: str, prev_assistant_text: str = "") -> bool:
+    if not candidate:
+        return True
+    if _CANNED_BOILERPLATE_RE.search(candidate):
+        return True
+    if prev_assistant_text:
+        c1 = re.sub(r"\s+", " ", candidate.lower()).strip()
+        c2 = re.sub(r"\s+", " ", prev_assistant_text.lower()).strip()
+        if c1 and c1 == c2:
+            return True
+    return False
+
     async def _sanitize_response(
         self,
         client: httpx.AsyncClient,
@@ -539,25 +620,40 @@ class LLMClient:
         max_tokens: int
     ) -> str:
         """
-        Backend profanity safeguard:
-        If candidate text contains words from the blocklist, retries once with a hidden polite instruction.
-        If still profane, replaces with a calm, polite fallback line.
+        Backend profanity & repetitive loop safeguard:
+        1. If candidate text repeats canned boilerplate or duplicates prior turn, defuses it with a fresh natural line.
+        2. If candidate text contains words from the blocklist, retries once with a hidden polite instruction.
+        3. If still profane or canned, replaces with a calm, polite fallback line.
         """
         clean_candidate = re.sub(r"<think>[\s\S]*?</think>", "", candidate_text).strip()
+
+        # Check for repetitive loops or canned boilerplate
+        prev_assistant = ""
+        for m in reversed(conversation):
+            if m.get("role") == "assistant":
+                prev_assistant = extract_text_from_content(m.get("content", "")).strip()
+                break
+
+        if _is_canned_or_repetitive(clean_candidate, prev_assistant):
+            logger.warning("[AUTONEXIS SAFEGUARD] Canned boilerplate or repetitive loop detected in model output, defusing.")
+            return get_polite_fallback(last_user_text)
+
         if not contains_profanity(clean_candidate):
             return clean_candidate
 
         logger.warning("[AUTONEXIS SAFEGUARD] Profanity detected in model output, triggering polite retry.")
         retry_conversation = list(conversation) + [
             {"role": "assistant", "content": clean_candidate},
-            {"role": "system", "content": "CRITICAL INSTRUCTION: Reply politely with absolutely no profanity, vulgarity, or swear words."}
+            {"role": "system", "content": "CRITICAL INSTRUCTION: Reply politely and naturally with absolutely no profanity, vulgarity, or swear words."}
         ]
         try:
             retry_payload = {
                 "model": active_model,
                 "messages": retry_conversation,
                 "stream": False,
-                "temperature": 0.3,
+                "temperature": 0.72,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
                 "max_tokens": max_tokens,
             }
             res = await client.post(endpoint, json=retry_payload, headers=headers)
@@ -565,7 +661,7 @@ class LLMClient:
                 retry_data = res.json()
                 retry_raw = retry_data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 clean_retry = re.sub(r"<think>[\s\S]*?</think>", "", retry_raw).strip()
-                if not contains_profanity(clean_retry) and clean_retry:
+                if not contains_profanity(clean_retry) and not _is_canned_or_repetitive(clean_retry, prev_assistant) and clean_retry:
                     return clean_retry
         except Exception as retry_err:
             logger.error(f"[AUTONEXIS SAFEGUARD RETRY ERROR] {retry_err}")
@@ -731,7 +827,9 @@ class LLMClient:
                             "messages": conversation,
                             "tools": tools,
                             "tool_choice": "auto",
-                            "temperature": 0.2 if is_math else 0.5,
+                            "temperature": 0.2 if is_math else 0.72,
+                            "presence_penalty": 0.2,
+                            "frequency_penalty": 0.3,
                             "max_tokens": max_tokens,
                             "stream": False,
                         }
@@ -986,7 +1084,9 @@ class LLMClient:
                     "model": candidate_model,
                     "messages": conversation,
                     "stream": True,
-                    "temperature": 0.6,
+                    "temperature": 0.2 if is_math else 0.72,
+                    "presence_penalty": 0.2,
+                    "frequency_penalty": 0.3,
                     "max_tokens": max_tokens,
                 }
                 try:
@@ -1169,7 +1269,9 @@ class LLMClient:
                             "messages": conversation,
                             "tools": tools,
                             "tool_choice": "auto",
-                            "temperature": 0.2 if is_math else 0.5,
+                            "temperature": 0.2 if is_math else 0.72,
+                            "presence_penalty": 0.2,
+                            "frequency_penalty": 0.3,
                             "max_tokens": max_tokens,
                             "stream": False,
                         }
@@ -1240,7 +1342,9 @@ class LLMClient:
                     "model": candidate_model,
                     "messages": conversation,
                     "stream": False,
-                    "temperature": 0.6,
+                    "temperature": 0.2 if is_math else 0.72,
+                    "presence_penalty": 0.2,
+                    "frequency_penalty": 0.3,
                     "max_tokens": max_tokens,
                 }
                 try:

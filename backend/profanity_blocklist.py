@@ -99,20 +99,32 @@ def contains_profanity(text: str) -> bool:
 
 def get_polite_fallback(user_text: str = "") -> str:
     """
-    Returns a warm, polite, non-abusive fallback response matching user language.
+    Returns a warm, natural, non-abusive fallback response matching user language and context.
+    Avoids repetitive or preachy corporate customer-support templates.
     """
     clean = (user_text or "").strip()
+    lower = clean.lower()
+
+    # Friendly teasing / banter in Hinglish
+    if re.search(r"\b(chal\s+be|abe|laud[ae]|lawd[ae]|chutiye?|kya\s+be|gandu)\b", lower):
+        return "Haha chill maar bhai, sab theek hai na? Bol kya chal raha hai."
+
+    # Defiance / challenge in Hinglish
+    if re.search(r"\b(nahi\s+btai|kya\s+kar\s+lega|tu\s+kya\s+karega)\b", lower):
+        return "Main kya karunga bhai, phone ke andar se bahar thodi aaunga! Chill maar, aaram se bata jab man kare."
+
+    # Devanagari Hindi
     has_devanagari = any('\u0900' <= char <= '\u097f' for char in clean)
     if has_devanagari:
-        return "मैं यहाँ आपकी सहायता के लिए उपस्थित हूँ। कृपया बताइए, आज मैं आपके किस काम में मदद कर सकता हूँ?"
+        return "अरे बताइए, क्या बात है? सब ठीक? किस बारे में बात करनी है?"
 
-    # Hinglish check
+    # Hinglish general
     hinglish_markers = {
         "kya", "kar", "rhe", "rahe", "ho", "hai", "hain", "hu", "hoon", "mera", "meri", "mere",
         "naam", "nam", "kaise", "kaisa", "batao", "bataiye", "bol", "bolo", "bhai", "yaar", "tu"
     }
     words = set(w.lower().strip(".,!?:;\"'()[]{}") for w in clean.split())
     if any(w in hinglish_markers for w in words):
-        return "Main yahan aapki madad karne ke liye hoon. Aap batao, aaj kya kaam karna hai?"
+        return "Haan bhai, bolo! Kya chal raha hai?"
 
-    return "I'm here to help you out. Let me know what you'd like to work on and we'll get it solved."
+    return "All good here! What's on your mind?"
