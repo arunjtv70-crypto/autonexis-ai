@@ -143,7 +143,10 @@ export async function postChatMessage(
   projectContext?: any,
   relevantPastChats?: any[],
   customStyle?: any,
-  voice = false
+  voice = false,
+  chatContext?: string,
+  clientTime?: string,
+  timezone?: string
 ): Promise<string> {
   const url = `${API_BASE_URL}/chat${isVisionDebugEnabled() ? "?debug=1" : ""}`;
   try {
@@ -155,6 +158,9 @@ export async function postChatMessage(
       project_context: projectContext || undefined,
       relevant_past_chats: relevantPastChats || undefined,
       custom_style: customStyle || undefined,
+      chat_context: chatContext || undefined,
+      client_time: clientTime || undefined,
+      timezone: timezone || undefined,
       voice: voice || undefined,
       debug: isVisionDebugEnabled() || undefined,
     });
@@ -218,6 +224,9 @@ export interface StreamChatOptions {
   imageStyle?: string;
   imageAspect?: string;
   imageSeed?: number;
+  chatContext?: string;
+  clientTime?: string;
+  timezone?: string;
   onRouterMeta?: (meta: ImageRouterMeta) => void;
   onImageStatus?: (status: { stage: string; aspect?: string; style?: string; router?: ImageRouterMeta }) => void;
   onImageResult?: (payload: ImageGenerationResultPayload) => void;
@@ -253,6 +262,9 @@ export async function streamChatMessage(
       project_context: projectContext || undefined,
       relevant_past_chats: relevantPastChats || undefined,
       custom_style: customStyle || undefined,
+      chat_context: options?.chatContext || undefined,
+      client_time: options?.clientTime || undefined,
+      timezone: options?.timezone || undefined,
       voice: voice || undefined,
       recent_context: options?.recentContext || undefined,
       force_image_mode: options?.forceImageMode || undefined,
@@ -630,3 +642,39 @@ export async function generateImageApi(params: {
     return { ok: false, error: "Network issue while creating image. Please try again." };
   }
 }
+
+/**
+ * Calls backend POST /api/chat/summarize to refresh in-chat memory (summary, facts, timeline, open threads).
+ * Strictly non-blocking and safe against rate limits.
+ */
+export async function summarizeChatMemory(
+  chatId: string,
+  oldState: any,
+  newMessages: any[],
+  clientTime?: string,
+  timezone?: string
+): Promise<any> {
+  const url = `${API_BASE_URL}/chat/summarize`;
+  try {
+    const headers = await getAuthHeaders(false);
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        chat_id: chatId,
+        old_state: oldState || undefined,
+        new_messages: newMessages,
+        client_time: clientTime || new Date().toISOString(),
+        timezone: timezone || (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC"),
+      }),
+    });
+    if (!res.ok) {
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn("[AUTONEXIS] Chat summarize request failed:", err);
+    return null;
+  }
+}
+

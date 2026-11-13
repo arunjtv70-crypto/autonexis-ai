@@ -124,6 +124,10 @@ export const ChatScreen: React.FC = () => {
     deleteErrorBanner,
     retryFailedDelete,
     dismissDeleteError,
+    getChatMemoryState,
+    deleteChatFact,
+    clearChatMemory,
+    getChatMemoryDebug,
     isSending,
     visionStage,
     cancelActiveReply,
@@ -135,6 +139,8 @@ export const ChatScreen: React.FC = () => {
     hasMoreChats,
     firestoreError,
   } = useChats();
+
+  const [isChatNotesModalOpen, setIsChatNotesModalOpen] = useState(false);
 
   const { user, firebaseUser, isGuest, setIsAuthScreenVisible, logout } = useAuth();
   const {
@@ -1032,6 +1038,21 @@ export const ChatScreen: React.FC = () => {
                   <span>{chat.archived ? "Unarchive" : "Archive"}</span>
                 </button>
 
+                {!isGuest && !chat._isTemporary && (
+                  <button
+                    type="button"
+                    className="chat-context-menu-btn"
+                    onClick={() => {
+                      selectChat(chat.id);
+                      setIsChatNotesModalOpen(true);
+                      setOpenChatMenuId(null);
+                    }}
+                  >
+                    <IconBrain size={13} />
+                    <span>Chat notes</span>
+                  </button>
+                )}
+
                 {projects.length > 0 && (
                   <div className="chat-context-menu-project-group">
                     <span className="chat-context-menu-sublabel">Project:</span>
@@ -1859,6 +1880,19 @@ export const ChatScreen: React.FC = () => {
               </button>
             )}
 
+            {/* In-Chat Memory Notes button (for active chat) */}
+            {activeChat && !isTemporaryChat && !isGuest && (
+              <button
+                type="button"
+                className="topbar-action-btn"
+                onClick={() => setIsChatNotesModalOpen(true)}
+                aria-label="Chat notes"
+                title="Chat notes & memory"
+              >
+                <IconBrain size={18} />
+              </button>
+            )}
+
             {/* Settings icon button */}
             <button
               type="button"
@@ -2016,6 +2050,37 @@ export const ChatScreen: React.FC = () => {
               </button>
             </div>
           )}
+          {isDebugMode && activeChat && getChatMemoryDebug(activeChat.id) && (() => {
+            const memDbg = getChatMemoryDebug(activeChat.id)!;
+            return (
+              <div
+                className="debug-chat-memory-strip"
+                style={{
+                  margin: "6px 14px 0",
+                  padding: "6px 12px",
+                  fontSize: "0.72rem",
+                  background: "rgba(99, 102, 241, 0.12)",
+                  border: "1px solid rgba(99, 102, 241, 0.25)",
+                  borderRadius: "6px",
+                  color: "var(--text-secondary, #c7d2fe)",
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "8px",
+                  alignItems: "center",
+                }}
+              >
+                <span><strong>Context Pack:</strong> {memDbg.totalTokens}/3500 tok</span>
+                <span>(Time: {memDbg.timeTokens} · Notes: {memDbg.notesTokens} · Snippets: {memDbg.snippetTokens} · Verbatim: {memDbg.verbatimTokens})</span>
+                {memDbg.gapMinutes > 0 && (
+                  <span>· Gap: {memDbg.gapMinutes}m {memDbg.isReturningAfterGap ? "(Long gap)" : ""}</span>
+                )}
+                <span>· Notes v{memDbg.notesVersion}</span>
+                {memDbg.recalledSnippets.length > 0 && (
+                  <span>· Recalled {memDbg.recalledSnippets.length} snippets (scores: {memDbg.recalledSnippets.map((s) => s.score).join(", ")})</span>
+                )}
+              </div>
+            );
+          })()}
           <main
             className="chat-conversation-area"
             ref={chatScrollRef}
@@ -2906,6 +2971,277 @@ export const ChatScreen: React.FC = () => {
         }}
         onFallbackSystemCamera={() => cameraInputRef.current?.click()}
       />
+
+      {/* In-Chat Memory Notes Modal */}
+      {isChatNotesModalOpen && activeChat && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setIsChatNotesModalOpen(false)}
+        >
+          <div
+            className="chat-notes-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: "560px",
+              width: "92vw",
+              maxHeight: "85vh",
+              display: "flex",
+              flexDirection: "column",
+              borderRadius: "16px",
+              background: "var(--bg-secondary, #1e1e24)",
+              border: "1px solid var(--border-color, rgba(255,255,255,0.08))",
+              boxShadow: "0 24px 64px rgba(0,0,0,0.4)",
+              overflow: "hidden",
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "18px 20px 14px",
+                borderBottom: "1px solid var(--border-color, rgba(255,255,255,0.08))",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <IconBrain size={18} style={{ color: "var(--accent, #6366f1)" }} />
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 600 }}>Chat Notes</h3>
+                  <p style={{ margin: "2px 0 0", fontSize: "0.74rem", color: "var(--text-muted, #9ca3af)" }}>
+                    Memory &amp; key details for this conversation
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsChatNotesModalOpen(false)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text-muted, #9ca3af)",
+                  fontSize: "1.2rem",
+                  cursor: "pointer",
+                  padding: "4px 8px",
+                  borderRadius: "6px",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div
+              style={{
+                padding: "16px 20px",
+                overflowY: "auto",
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                gap: "18px",
+              }}
+            >
+              {(() => {
+                const memoryState = getChatMemoryState(activeChat.id);
+                const hasSummary = !!memoryState?.summary?.trim();
+                const hasFacts = Array.isArray(memoryState?.facts) && memoryState.facts.length > 0;
+                const hasThreads = Array.isArray(memoryState?.openThreads) && memoryState.openThreads.length > 0;
+                const hasTimeline = Array.isArray(memoryState?.timeline) && memoryState.timeline.length > 0;
+                const isEmpty = !hasSummary && !hasFacts && !hasThreads && !hasTimeline;
+
+                if (isEmpty) {
+                  return (
+                    <div style={{ textAlign: "center", padding: "36px 16px", color: "var(--text-muted, #9ca3af)" }}>
+                      <IconFileText size={32} style={{ opacity: 0.35, marginBottom: "8px" }} />
+                      <p style={{ margin: "4px 0", fontSize: "0.88rem", fontWeight: 500 }}>No notes recorded yet</p>
+                      <p style={{ margin: "4px 0", fontSize: "0.78rem", opacity: 0.8 }}>
+                        As you chat, the assistant automatically summarizes decisions, key facts, and open tasks here.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <>
+                    {hasSummary && (
+                      <div>
+                        <h4 style={{ margin: "0 0 6px", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted, #9ca3af)" }}>
+                          Summary
+                        </h4>
+                        <div
+                          style={{
+                            padding: "12px 14px",
+                            borderRadius: "10px",
+                            background: "var(--bg-card, rgba(255,255,255,0.04))",
+                            fontSize: "0.85rem",
+                            lineHeight: "1.5",
+                            color: "var(--text-primary, #f3f4f6)",
+                          }}
+                        >
+                          {memoryState.summary}
+                        </div>
+                      </div>
+                    )}
+
+                    {hasFacts && (
+                      <div>
+                        <h4 style={{ margin: "0 0 8px", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted, #9ca3af)" }}>
+                          Key Facts &amp; Decisions ({memoryState.facts.length})
+                        </h4>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          {memoryState.facts.map((fact) => (
+                            <div
+                              key={fact.id}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                padding: "8px 12px",
+                                borderRadius: "8px",
+                                background: "var(--bg-card, rgba(255,255,255,0.03))",
+                                border: "1px solid var(--border-color, rgba(255,255,255,0.06))",
+                                fontSize: "0.82rem",
+                                gap: "10px",
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, minWidth: 0 }}>
+                                <span
+                                  style={{
+                                    fontSize: "0.66rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "4px",
+                                    textTransform: "uppercase",
+                                    fontWeight: 600,
+                                    background:
+                                      fact.type === "decision"
+                                        ? "rgba(16, 185, 129, 0.15)"
+                                        : fact.type === "preference"
+                                        ? "rgba(139, 92, 246, 0.15)"
+                                        : "rgba(59, 130, 246, 0.15)",
+                                    color:
+                                      fact.type === "decision"
+                                        ? "#10b981"
+                                        : fact.type === "preference"
+                                        ? "#a78bfa"
+                                        : "#60a5fa",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {fact.type || "fact"}
+                                </span>
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{fact.text}</span>
+                                {fact.time && (
+                                  <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginLeft: "auto", flexShrink: 0 }}>
+                                    {fact.time}
+                                  </span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => deleteChatFact(activeChat.id, fact.id)}
+                                title="Delete fact"
+                                style={{
+                                  background: "transparent",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  color: "var(--text-muted, #9ca3af)",
+                                  padding: "4px",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  borderRadius: "4px",
+                                }}
+                              >
+                                <IconTrash size={13} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {hasThreads && (
+                      <div>
+                        <h4 style={{ margin: "0 0 6px", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted, #9ca3af)" }}>
+                          Open Threads / Next Steps
+                        </h4>
+                        <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "0.82rem", lineHeight: "1.6", color: "var(--text-secondary, #d1d5db)" }}>
+                          {memoryState.openThreads.map((thread, idx) => (
+                            <li key={idx}>{thread}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {hasTimeline && (
+                      <div>
+                        <h4 style={{ margin: "0 0 6px", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--text-muted, #9ca3af)" }}>
+                          Timeline Milestones
+                        </h4>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          {memoryState.timeline.map((item, idx) => (
+                            <div key={idx} style={{ fontSize: "0.78rem", color: "var(--text-muted, #9ca3af)", display: "flex", gap: "8px" }}>
+                              <span style={{ fontWeight: 600, color: "var(--accent, #6366f1)", flexShrink: 0 }}>[{item.time}]</span>
+                              <span>{item.note}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "14px 20px",
+                borderTop: "1px solid var(--border-color, rgba(255,255,255,0.08))",
+                background: "var(--bg-secondary, #1a1a20)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("Clear all notes and in-chat memory for this conversation?")) {
+                    clearChatMemory(activeChat.id);
+                  }
+                }}
+                style={{
+                  background: "transparent",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "#ef4444",
+                  fontSize: "0.78rem",
+                  padding: "6px 12px",
+                  borderRadius: "8px",
+                  cursor: "pointer",
+                }}
+              >
+                Clear notes
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsChatNotesModalOpen(false)}
+                style={{
+                  background: "var(--accent, #6366f1)",
+                  border: "none",
+                  color: "#fff",
+                  fontSize: "0.82rem",
+                  fontWeight: 500,
+                  padding: "7px 16px",
+                  borderRadius: "8px",
+                  cursor: "pointer",
+                }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Calm Guest Limit / Voice Call Login Modal */}
       {showGuestLimitModal && (

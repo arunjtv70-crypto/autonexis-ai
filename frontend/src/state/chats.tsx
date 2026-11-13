@@ -5,6 +5,7 @@ import {
   extractMemoriesApi,
   createCustomStyleApi,
   generateImageApi,
+  summarizeChatMemory,
   type ChatMessagePayload,
   type MultimodalPart,
   type ImageRouterMeta,
@@ -50,6 +51,10 @@ import {
   saveMessageFeedback,
   loadChatFeedback,
   saveProblemReport,
+  loadChatMemoryState,
+  saveChatMemoryState,
+  deleteChatMemoryFact,
+  clearChatMemoryState,
   DEFAULT_USER_PREFERENCES,
   type FirestoreChatMeta,
   type FirestoreMessage,
@@ -59,7 +64,13 @@ import {
   type FirestoreProject,
   type FirestoreProjectFile,
   type FirestoreFeedback,
+  type ChatMemoryState,
 } from "../db";
+import {
+  buildContextPack,
+  type ContextPackDebugInfo,
+  type SearchableMessage,
+} from "../utils/chatMemory";
 
 export interface MessageFileMeta {
   name: string;
@@ -249,6 +260,11 @@ export interface ChatsContextType {
   deleteErrorBanner: { chatId: string; message: string } | null;
   retryFailedDelete: () => Promise<void>;
   dismissDeleteError: () => void;
+  getChatMemoryState: (chatId: string) => ChatMemoryState | null;
+  loadChatMemoryStateNow: (chatId: string) => Promise<ChatMemoryState | null>;
+  deleteChatFact: (chatId: string, factId: string) => Promise<void>;
+  clearChatMemory: (chatId: string) => Promise<void>;
+  getChatMemoryDebug: (chatId: string) => ContextPackDebugInfo | null;
   runVoiceCallTurn: (
     spokenText: string,
     callbacks: VoiceTurnCallbacks
@@ -802,6 +818,76 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [visionStage, setVisionStage] = useState<VisionStage | null>(null);
   const sessionOriginalsRef = useRef<Map<string, string>>(new Map());
 
+  // In-Chat Memory State & BM25 Debug Store
+  const [chatMemoryMap, setChatMemoryMap] = useState<Record<string, ChatMemoryState>>({});
+  const chatMemoryMapRef = useRef<Record<string, ChatMemoryState>>({});
+  chatMemoryMapRef.current = chatMemoryMap;
+  const [activeMemoryDebug, setActiveMemoryDebug] = useState<Record<string, ContextPackDebugInfo>>({});
+
+  const getChatMemoryState = useCallback((chatId: string): ChatMemoryState | null => {
+    return chatMemoryMapRef.current[chatId] || null;
+  }, []);
+
+  const loadChatMemoryStateNow = useCallback(
+    async (chatId: string): Promise<ChatMemoryState | null> => {
+      if (chatMemoryMapRef.current[chatId]) return chatMemoryMapRef.current[chatId];
+      if (!isAuthenticated || !currentUid || currentUid === "guest") return null;
+      const st = await loadChatMemoryState(currentUid, chatId);
+      if (st) {
+        setChatMemoryMap((prev) => ({ ...prev, [chatId]: st }));
+        chatMemoryMapRef.current[chatId] = st;
+      }
+      return st;
+    },
+    [isAuthenticated, currentUid]
+  );
+
+  const deleteChatFact = useCallback(
+    async (chatId: string, factId: string) => {
+      setChatMemoryMap((prev) => {
+        const existing = prev[chatId];
+        if (!existing) return prev;
+        const updated = {
+          ...existing,
+          facts: existing.facts.filter((f) => f.id !== factId),
+        };
+        chatMemoryMapRef.current[chatId] = updated;
+        return { ...prev, [chatId]: updated };
+      });
+      if (isAuthenticated && currentUid && currentUid !== "guest") {
+        await deleteChatMemoryFact(currentUid, chatId, factId);
+      }
+    },
+    [isAuthenticated, currentUid]
+  );
+
+  const clearChatMemory = useCallback(
+    async (chatId: string) => {
+      setChatMemoryMap((prev) => {
+        const next = { ...prev };
+        delete next[chatId];
+        delete chatMemoryMapRef.current[chatId];
+        return next;
+      });
+      setActiveMemoryDebug((prev) => {
+        const next = { ...prev };
+        delete next[chatId];
+        return next;
+      });
+      if (isAuthenticated && currentUid && currentUid !== "guest") {
+        await clearChatMemoryState(currentUid, chatId);
+      }
+    },
+    [isAuthenticated, currentUid]
+  );
+
+  const getChatMemoryDebug = useCallback(
+    (chatId: string): ContextPackDebugInfo | null => {
+      return activeMemoryDebug[chatId] || null;
+    },
+    [activeMemoryDebug]
+  );
+
   useEffect(() => {
     sessionOriginalsRef.current.clear();
   }, [currentUid]);
@@ -1191,12 +1277,20 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [chats, currentUid]);
 
-  // Load messages when active chat changes (for Firestore-backed chats)
+  // Load messages and in-chat memory state when active chat changes (for Firestore-backed chats)
   useEffect(() => {
     if (activeChatId && isAuthenticated && currentUid && currentUid !== "guest") {
       const chat = chats.find((c) => c.id === activeChatId);
       if (chat && !chat._messagesLoaded) {
         loadMessagesForChat(currentUid, activeChatId);
+      }
+      if (!chatMemoryMapRef.current[activeChatId]) {
+        loadChatMemoryState(currentUid, activeChatId).then((st) => {
+          if (st) {
+            setChatMemoryMap((prev) => ({ ...prev, [activeChatId]: st }));
+            chatMemoryMapRef.current[activeChatId] = st;
+          }
+        });
       }
     }
   }, [activeChatId, isAuthenticated, currentUid, chats, loadMessagesForChat]);
@@ -2683,6 +2777,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     historyPayload: ChatMessagePayload[];
     memoryPrompt: string;
     recentContext?: Array<Record<string, any>>;
+    chatContext?: string;
+    clientTime?: string;
+    timezone?: string;
   }) => {
     const {
       capturedChatId,
@@ -2693,6 +2790,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       historyPayload,
       memoryPrompt,
       recentContext,
+      chatContext,
+      clientTime,
+      timezone,
     } = params;
     const assistantMsgId = "ast_" + Date.now();
 
@@ -2834,6 +2934,58 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })();
     };
 
+    const triggerChatSummarization = (chatId: string) => {
+      if (isTemp || !isAuthenticated || !requestUid || requestUid === "guest") return;
+      const targetChat = chatsRef.current.find((c) => c.id === chatId);
+      if (!targetChat || targetChat.messages.length < 6) return;
+
+      const memoryState = chatMemoryMapRef.current[chatId];
+      const lastSummarizedId = memoryState?.lastSummarizedMessageId;
+      const msgs = targetChat.messages;
+
+      let newMessagesSinceLastSummary: MessageItem[] = [];
+      if (!lastSummarizedId) {
+        newMessagesSinceLastSummary = msgs;
+      } else {
+        const lastIdx = msgs.findIndex((m) => m.id === lastSummarizedId);
+        if (lastIdx === -1) {
+          newMessagesSinceLastSummary = msgs;
+        } else {
+          newMessagesSinceLastSummary = msgs.slice(lastIdx + 1);
+        }
+      }
+
+      // Trigger if >= 6 new messages since last summary, or never summarized with >= 6 msgs
+      if (newMessagesSinceLastSummary.length < 6) return;
+
+      (async () => {
+        try {
+          const payloadMsgs = newMessagesSinceLastSummary.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: typeof m.content === "string" ? m.content : "",
+            createdAt: m.created_at,
+          }));
+
+          const updated = await summarizeChatMemory(
+            chatId,
+            memoryState || undefined,
+            payloadMsgs,
+            new Date().toISOString(),
+            typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC"
+          );
+
+          if (updated && updated.summary !== undefined) {
+            setChatMemoryMap((prev) => ({ ...prev, [chatId]: updated }));
+            chatMemoryMapRef.current[chatId] = updated;
+            await saveChatMemoryState(requestUid, chatId, updated);
+          }
+        } catch (err) {
+          console.warn("[AUTONEXIS] Background chat summarization failed:", err);
+        }
+      })();
+    };
+
     const completeTextReply = async (finalReplyText: string) => {
       if (handledByImageStream) {
         setIsSending(false);
@@ -2872,6 +3024,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       saveAssistantReply(finalReplyText);
       triggerMemoryExtraction(trimmedQuery, finalReplyText);
+      triggerChatSummarization(capturedChatId);
       triggerNotificationAndSound(finalReplyText);
       setVisionStage(null);
       setIsSending(false);
@@ -3028,7 +3181,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   isGuest,
                   projectContext,
                   relevantPastChats,
-                  customStylePayload
+                  customStylePayload,
+                  false,
+                  chatContext,
+                  clientTime,
+                  timezone
                 );
                 if (activeUidRef.current !== requestUid || controller.signal.aborted) {
                   return;
@@ -3058,6 +3215,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           forceImageMode: false,
           imageStyle,
           imageAspect,
+          chatContext,
+          clientTime,
+          timezone,
           onVisionStage: (st) => {
             if (activeUidRef.current === requestUid && !controller.signal.aborted) {
               setVisionStage(st);
@@ -3389,6 +3549,28 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       historyPayload.push({ role: "user", content: trimmed });
     }
 
+    const searchableMsgs: SearchableMessage[] = recentMessages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : "",
+      createdAt: m.created_at,
+    }));
+
+    const clientTimeIso = new Date().toISOString();
+    const userTimezone =
+      typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC";
+    const currentMemoryState = chatMemoryMapRef.current[targetChatId] || null;
+
+    const pack = buildContextPack({
+      messages: searchableMsgs,
+      chatMemoryState: currentMemoryState,
+      newQuery: trimmed || fileLabel || "Please reply",
+      clientTimeIso,
+      timezone: userTimezone,
+    });
+
+    setActiveMemoryDebug((prev) => ({ ...prev, [targetChatId]: pack.debugInfo }));
+
     await streamAssistantReply({
       capturedChatId,
       autoTitle,
@@ -3398,6 +3580,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       historyPayload,
       memoryPrompt,
       recentContext,
+      chatContext: pack.chatContextBlock,
+      clientTime: clientTimeIso,
+      timezone: userTimezone,
     });
   };
 
@@ -3458,6 +3643,37 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       { role: "user", content: cleanNew },
     ];
 
+    const searchableMsgs: SearchableMessage[] = keptBefore.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : "",
+      createdAt: m.created_at,
+    }));
+
+    const clientTimeIso = new Date().toISOString();
+    const userTimezone =
+      typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC";
+    const currentMemoryState = chatMemoryMapRef.current[chatId] || null;
+
+    const pack = buildContextPack({
+      messages: searchableMsgs,
+      chatMemoryState: currentMemoryState,
+      newQuery: cleanNew,
+      clientTimeIso,
+      timezone: userTimezone,
+    });
+
+    setActiveMemoryDebug((prev) => ({ ...prev, [chatId]: pack.debugInfo }));
+
+    // Reset lastSummarizedMessageId to invalidate past summary and re-evaluate on next trigger
+    setChatMemoryMap((prev) => {
+      const existing = prev[chatId];
+      if (!existing) return prev;
+      const updated = { ...existing, lastSummarizedMessageId: undefined };
+      chatMemoryMapRef.current[chatId] = updated;
+      return { ...prev, [chatId]: updated };
+    });
+
     await streamAssistantReply({
       capturedChatId: chatId,
       autoTitle: chat.title,
@@ -3466,6 +3682,9 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       trimmedQuery: cleanNew,
       historyPayload,
       memoryPrompt,
+      chatContext: pack.chatContextBlock,
+      clientTime: clientTimeIso,
+      timezone: userTimezone,
     });
   };
 
@@ -3788,6 +4007,11 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deleteErrorBanner,
         retryFailedDelete,
         dismissDeleteError,
+        getChatMemoryState,
+        loadChatMemoryStateNow,
+        deleteChatFact,
+        clearChatMemory,
+        getChatMemoryDebug,
         runVoiceCallTurn,
         isSending,
         visionStage,

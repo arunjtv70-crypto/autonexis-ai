@@ -66,6 +66,9 @@ class DirectChatRequest(BaseModel):
     project_context: Optional[Dict[str, Any]] = None
     relevant_past_chats: Optional[List[Dict[str, Any]]] = None
     custom_style: Optional[Dict[str, Any]] = None
+    chat_context: Optional[str] = None
+    client_time: Optional[str] = None
+    timezone: Optional[str] = None
     voice: bool = False
     recent_context: Optional[List[Dict[str, Any]]] = None
     force_image_mode: bool = False
@@ -76,6 +79,13 @@ class DirectChatRequest(BaseModel):
 
 class StyleCreateRequest(BaseModel):
     sample: str = Field(..., min_length=10, max_length=2000)
+
+class ChatSummarizeRequest(BaseModel):
+    chat_id: str
+    old_state: Optional[Dict[str, Any]] = None
+    new_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    client_time: Optional[str] = None
+    timezone: Optional[str] = None
 
 class MemoryExtractMessage(BaseModel):
     role: str
@@ -100,6 +110,10 @@ STYLE_USER_REQUESTS: Dict[str, List[float]] = {}
 STYLE_RATE_LIMIT_WINDOW = 3600.0
 STYLE_RATE_LIMIT_MAX = 15
 
+SUMMARIZE_USER_REQUESTS: Dict[str, List[float]] = {}
+SUMMARIZE_RATE_LIMIT_WINDOW = 3600.0
+SUMMARIZE_RATE_LIMIT_MAX = 15
+
 def check_style_rate_limit(uid: str) -> None:
     now = time.time()
     timestamps = STYLE_USER_REQUESTS.get(uid, [])
@@ -111,6 +125,18 @@ def check_style_rate_limit(uid: str) -> None:
         )
     timestamps.append(now)
     STYLE_USER_REQUESTS[uid] = timestamps
+
+def check_summarize_rate_limit(uid: str) -> None:
+    now = time.time()
+    timestamps = SUMMARIZE_USER_REQUESTS.get(uid, [])
+    timestamps = [t for t in timestamps if now - t < SUMMARIZE_RATE_LIMIT_WINDOW]
+    if len(timestamps) >= SUMMARIZE_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many chat summary requests. Please wait a bit."
+        )
+    timestamps.append(now)
+    SUMMARIZE_USER_REQUESTS[uid] = timestamps
 
 def check_guest_rate_limit(client_ip: str) -> None:
     now = time.time()
@@ -209,6 +235,7 @@ async def chat_direct(
         project_context=req.project_context,
         relevant_past_chats=req.relevant_past_chats if not is_guest else None,
         custom_style=req.custom_style if not is_guest else None,
+        chat_context=req.chat_context,
         is_guest=is_guest,
         voice=bool(req.voice),
         uid=uid_str,
@@ -292,6 +319,7 @@ async def chat_stream_endpoint(
             project_context=req.project_context,
             relevant_past_chats=req.relevant_past_chats if not is_guest else None,
             custom_style=req.custom_style if not is_guest else None,
+            chat_context=req.chat_context,
             is_guest=is_guest,
             voice=bool(req.voice),
             uid=uid_str,
@@ -339,6 +367,27 @@ async def create_custom_style_endpoint(
     current_user = await get_current_user(request, auth, db)
     check_style_rate_limit(current_user.id)
     return await llm_client.analyze_writing_style(req.sample)
+
+@app.post("/api/chat/summarize")
+@app.post("/chat/summarize")
+async def summarize_chat_endpoint(
+    req: ChatSummarizeRequest,
+    request: Request,
+    auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Refreshes in-chat memory (summary, key facts, timeline, open threads).
+    Requires authenticated Firebase token and enforces per-user rate limit.
+    """
+    current_user = await get_current_user(request, auth, db)
+    check_summarize_rate_limit(str(current_user.id))
+    return await llm_client.summarize_chat_memory(
+        old_state=req.old_state,
+        new_messages=req.new_messages,
+        client_time=req.client_time,
+        timezone=req.timezone,
+    )
 
 # -------------------------------------------------------------
 # UNIFIED FRONTEND SERVING (SINGLE WORKING LINK: http://localhost:8000)

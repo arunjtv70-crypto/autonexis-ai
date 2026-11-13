@@ -623,7 +623,16 @@ export async function deleteChat(uid: string, chatId: string): Promise<void> {
       // Non-fatal feedback cleanup error
     }
 
-    // 4. Delete the chat document itself
+    // 4. Delete in-chat memory state document
+    try {
+      const memoryDocRef = doc(db(), "users", uid, "chats", chatId, "state", "memory");
+      await deleteDoc(memoryDocRef).catch(() => {});
+      recordStorageDebugTrace("delete_chat_memory", memoryDocRef.path);
+    } catch {
+      // Non-fatal memory cleanup error
+    }
+
+    // 5. Delete the chat document itself
     await deleteDoc(chatDocRef);
     recordStorageDebugTrace("delete_chat", chatDocRef.path);
 
@@ -1392,6 +1401,106 @@ export async function saveImageReport(
     createdAt: serverTimestamp(),
   });
   return reportId;
+}
+
+// ---------------------------------------------------------------------------
+// In-Chat Memory State Store (users/{uid}/chats/{chatId}/state/memory)
+// ---------------------------------------------------------------------------
+
+export interface ChatMemoryFact {
+  id: string;
+  text: string;
+  type?: "fact" | "decision" | "preference" | "detail";
+  sourceMessageId?: string;
+  time?: string;
+}
+
+export interface ChatMemoryTimelineItem {
+  time: string;
+  note: string;
+}
+
+export interface ChatMemoryState {
+  summary: string;
+  facts: ChatMemoryFact[];
+  openThreads: string[];
+  timeline: ChatMemoryTimelineItem[];
+  lastSummarizedMessageId?: string;
+  version: number;
+  updatedAt: string;
+}
+
+export async function loadChatMemoryState(
+  uid: string,
+  chatId: string
+): Promise<ChatMemoryState | null> {
+  if (!uid || !chatId || isChatDeletingOrDeleted(uid, chatId)) return null;
+  try {
+    const memoryRef = doc(db(), "users", uid, "chats", chatId, "state", "memory");
+    const snap = await getDoc(memoryRef);
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    return {
+      summary: typeof data.summary === "string" ? data.summary : "",
+      facts: Array.isArray(data.facts) ? data.facts : [],
+      openThreads: Array.isArray(data.openThreads) ? data.openThreads : [],
+      timeline: Array.isArray(data.timeline) ? data.timeline : [],
+      lastSummarizedMessageId: typeof data.lastSummarizedMessageId === "string" ? data.lastSummarizedMessageId : undefined,
+      version: typeof data.version === "number" ? data.version : 1,
+      updatedAt: tsToISO(data.updatedAt),
+    };
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed loading chat memory state:", err);
+    return null;
+  }
+}
+
+export async function saveChatMemoryState(
+  uid: string,
+  chatId: string,
+  state: ChatMemoryState
+): Promise<void> {
+  if (!uid || !chatId || isChatDeletingOrDeleted(uid, chatId)) return;
+  const memoryRef = doc(db(), "users", uid, "chats", chatId, "state", "memory");
+  await setDoc(memoryRef, {
+    summary: (state.summary || "").slice(0, 1500),
+    facts: (state.facts || []).slice(0, 60),
+    openThreads: (state.openThreads || []).slice(0, 10),
+    timeline: (state.timeline || []).slice(0, 45),
+    lastSummarizedMessageId: state.lastSummarizedMessageId || null,
+    version: (state.version || 0) + 1,
+    updatedAt: serverTimestamp(),
+  });
+  recordStorageDebugTrace("save_chat_memory", memoryRef.path);
+}
+
+export async function deleteChatMemoryFact(
+  uid: string,
+  chatId: string,
+  factId: string
+): Promise<void> {
+  if (!uid || !chatId || !factId || isChatDeletingOrDeleted(uid, chatId)) return;
+  const current = await loadChatMemoryState(uid, chatId);
+  if (!current) return;
+  const filteredFacts = current.facts.filter((f) => f.id !== factId);
+  await saveChatMemoryState(uid, chatId, {
+    ...current,
+    facts: filteredFacts,
+  });
+}
+
+export async function clearChatMemoryState(
+  uid: string,
+  chatId: string
+): Promise<void> {
+  if (!uid || !chatId) return;
+  try {
+    const memoryRef = doc(db(), "users", uid, "chats", chatId, "state", "memory");
+    await deleteDoc(memoryRef).catch(() => {});
+    recordStorageDebugTrace("clear_chat_memory", memoryRef.path);
+  } catch (err) {
+    console.warn("[AUTONEXIS DB] Failed to clear chat memory state:", err);
+  }
 }
 
 

@@ -426,6 +426,42 @@ CRITICAL RULES (NO EXCEPTIONS):
    - Include "text, words, letters" in `negative` ONLY when has_text_overlay is false. If user requested poster/logo text, do NOT put "text" in `negative`.
 4. Never mention third-party AI model or platform names."""
 
+# ------------------------------------------------------------------------------
+# 8. IN-CHAT MEMORY & CONTEXT SUMMARIZATION
+# ------------------------------------------------------------------------------
+CHAT_SUMMARIZATION_SYSTEM_PROMPT: str = """You are the in-chat memory extractor for AUTONEXIS Assistant.
+Your task is to analyze the recent conversation turns along with any previous chat memory state and return a refreshed, consolidated JSON memory object for this single chat.
+
+Output ONLY valid JSON matching this schema:
+{
+  "summary": "concise narrative summary under 1200 characters",
+  "facts": [
+    {
+      "id": "short string identifier like f1",
+      "text": "specific fact, decision, preference, or detail",
+      "type": "fact" | "decision" | "preference" | "detail",
+      "sourceMessageId": "optional message id",
+      "time": "optional timestamp like 14:15 or earlier"
+    }
+  ],
+  "openThreads": ["unresolved questions or pending tasks"],
+  "timeline": [
+    {
+      "time": "HH:MM or approximate milestone time",
+      "note": "one-line milestone summary"
+    }
+  ],
+  "lastSummarizedMessageId": "string id of the latest message processed"
+}
+
+STRICT CONSTRAINTS:
+1. "summary": Max 1200 characters. Objective and narrative.
+2. "facts": Maximum 40 items. Keep durable facts, user details, and decisions.
+3. "openThreads": Maximum 8 short strings.
+4. "timeline": Maximum 30 items tracking progression of the discussion chronologically.
+5. Redact passwords, bearer tokens, API keys, or OTPs as [REDACTED_SECRET].
+6. Output pure JSON only. Do not enclose in markdown blocks unless raw string parsing."""
+
 
 
 
