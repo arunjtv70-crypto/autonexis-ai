@@ -12,6 +12,7 @@ import {
   type ImageGenerationResultPayload,
   type VisionStage,
   type VisionDebugInfo,
+  type ToolSourceItem,
 } from "../api/client";
 import { APP_VERSION } from "../config";
 import { useAuth } from "./auth";
@@ -103,6 +104,7 @@ export interface MessageItem {
   errorMessage?: string;
   routerMeta?: ImageRouterMeta;
   visionDebug?: VisionDebugInfo;
+  sources?: ToolSourceItem[];
   videoDuration?: string;
 }
 
@@ -271,6 +273,7 @@ export interface ChatsContextType {
   ) => Promise<{ chatId: string; fullText: string; rateLimited?: boolean }>;
   isSending: boolean;
   visionStage: VisionStage | null;
+  activeToolStatus: string | null;
   cancelActiveReply: () => void;
   getSessionOriginalUrl: (displayUrl: string) => string | undefined;
   guestMsgCount: number;
@@ -816,6 +819,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   activeChatIdRef.current = activeChatId;
   const [isSending, setIsSending] = useState(false);
   const [visionStage, setVisionStage] = useState<VisionStage | null>(null);
+  const [activeToolStatus, setActiveToolStatus] = useState<string | null>(null);
   const sessionOriginalsRef = useRef<Map<string, string>>(new Map());
 
   // In-Chat Memory State & BM25 Debug Store
@@ -914,6 +918,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       abortControllerRef.current = null;
     }
     setVisionStage(null);
+    setActiveToolStatus(null);
     setIsSending(false);
   }, []);
 
@@ -3027,6 +3032,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       triggerChatSummarization(capturedChatId);
       triggerNotificationAndSound(finalReplyText);
       setVisionStage(null);
+      setActiveToolStatus(null);
       setIsSending(false);
     };
 
@@ -3232,6 +3238,16 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           },
           onVisionDebug: (dbg) => {
             updateMessageInChat(capturedChatId, assistantMsgId, { visionDebug: dbg });
+          },
+          onToolStatus: (st) => {
+            if (activeUidRef.current === requestUid && !controller.signal.aborted) {
+              setActiveToolStatus(st);
+            }
+          },
+          onToolSources: (srcs) => {
+            if (activeUidRef.current === requestUid && !controller.signal.aborted) {
+              updateMessageInChat(capturedChatId, assistantMsgId, { sources: srcs });
+            }
           },
           onRouterMeta: (meta) => {
             updateMessageInChat(capturedChatId, assistantMsgId, { routerMeta: meta });
@@ -4036,6 +4052,7 @@ export const ChatsProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         runVoiceCallTurn,
         isSending,
         visionStage,
+        activeToolStatus,
         cancelActiveReply,
         getSessionOriginalUrl,
         guestMsgCount,

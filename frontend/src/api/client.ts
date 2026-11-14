@@ -218,6 +218,13 @@ export interface ImageGenerationResultPayload {
   router?: ImageRouterMeta;
 }
 
+export interface ToolSourceItem {
+  title: string;
+  url?: string;
+  attribution: string;
+  fetched_at?: string;
+}
+
 export interface StreamChatOptions {
   recentContext?: Array<Record<string, any>>;
   forceImageMode?: boolean;
@@ -234,6 +241,8 @@ export interface StreamChatOptions {
   onImageError?: (payload: { message: string; rate_limited?: boolean; retry_after?: number; router?: ImageRouterMeta }) => void;
   onVisionStage?: (stage: VisionStage) => void;
   onVisionDebug?: (debug: VisionDebugInfo) => void;
+  onToolStatus?: (status: string, tool?: string) => void;
+  onToolSources?: (sources: ToolSourceItem[]) => void;
 }
 
 export async function streamChatMessage(
@@ -359,6 +368,10 @@ export async function streamChatMessage(
                 options?.onVisionStage?.(parsed.stage as VisionStage);
               } else if (parsed.type === "vision_debug" && parsed.debug) {
                 options?.onVisionDebug?.(parsed.debug as VisionDebugInfo);
+              } else if (parsed.type === "tool_status" && parsed.status) {
+                options?.onToolStatus?.(parsed.status, parsed.tool);
+              } else if (parsed.type === "tool_sources" && Array.isArray(parsed.sources)) {
+                options?.onToolSources?.(parsed.sources as ToolSourceItem[]);
               } else if (parsed.type === "image_status") {
                 options?.onImageStatus?.(parsed);
               } else if (parsed.type === "image_result") {

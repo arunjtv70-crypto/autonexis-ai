@@ -2560,3 +2560,58 @@ html[data-app-mode="true"] .desktop-sidebar .sidebar-inner {
   align-items: center;
   gap: 10px;
 }
+
+/* Data-Source Attribution Line (Open-Meteo, OpenStreetMap, ECB) */
+.message-sources-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 0.5rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.sources-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.source-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.source-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+  transition: text-decoration 0.2s ease, opacity 0.2s ease;
+}
+
+.source-link:hover {
+  text-decoration: underline;
+  opacity: 0.85;
+}
+
+.source-text {
+  color: var(--text-secondary);
+}
+
+.source-time {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.source-sep {
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin: 0 1px;
+}
+

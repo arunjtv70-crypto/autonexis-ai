@@ -130,6 +130,7 @@ export const ChatScreen: React.FC = () => {
     getChatMemoryDebug,
     isSending,
     visionStage,
+    activeToolStatus,
     cancelActiveReply,
     getSessionOriginalUrl,
     guestMessagesRemaining,
@@ -2414,6 +2415,36 @@ export const ChatScreen: React.FC = () => {
                             </div>
                           )}
 
+                          {/* Data-Source Attribution Line (Required for Open-Meteo, OpenStreetMap, ECB reference data) */}
+                          {!isUser && msg.sources && msg.sources.length > 0 && (
+                            <div className="message-sources-bar" aria-label="Data sources and attributions">
+                              <span className="sources-label">Sources:</span>
+                              {msg.sources.map((s, sIdx) => (
+                                <span key={sIdx} className="source-item">
+                                  {s.url ? (
+                                    <a
+                                      href={s.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="source-link"
+                                    >
+                                      {s.attribution || s.title}
+                                    </a>
+                                  ) : (
+                                    <span className="source-text">{s.attribution || s.title}</span>
+                                  )}
+                                  {s.fetched_at && (
+                                    <span className="source-time">
+                                      {" "}
+                                      ({new Date(s.fetched_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})
+                                    </span>
+                                  )}
+                                  {sIdx < msg.sources!.length - 1 && <span className="source-sep">•</span>}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
                           {isUser && isEditingThis ? (
                             <div className="user-edit-message-box">
                               <textarea
@@ -2645,6 +2676,17 @@ export const ChatScreen: React.FC = () => {
                                 : visionStage === "checking"
                                 ? "Checking details..."
                                 : "Writing the answer..."}
+                            </span>
+                          </div>
+                        ) : activeToolStatus ? (
+                          <div className="vision-bubble-stage">
+                            <div className="typing-dots">
+                              <span className="dot"></span>
+                              <span className="dot"></span>
+                              <span className="dot"></span>
+                            </div>
+                            <span className="vision-bubble-stage-text">
+                              {activeToolStatus}
                             </span>
                           </div>
                         ) : (
