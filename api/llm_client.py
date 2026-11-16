@@ -246,6 +246,21 @@ def _build_search_query(messages: List[Dict[str, Any]], last_user_text: str) -> 
     return q[:300]
 
 
+_DEAD_MODELS: Dict[str, float] = {}
+
+
+def _mark_model_dead(model: str, status: int, ttl: float = 1800.0) -> None:
+    """Models that answer 403/404 (no access / not found) are skipped for a while."""
+    if status in (403, 404) and model:
+        _DEAD_MODELS[model] = time.monotonic() + ttl
+
+
+def _drop_dead_models(models: List[str]) -> List[str]:
+    now = time.monotonic()
+    alive = [m for m in models if _DEAD_MODELS.get(m, 0.0) <= now]
+    return alive or models
+
+
 def _retry_after_seconds(headers: Any, cap: float = 3.0) -> float:
     """Reads Retry-After (seconds) from upstream headers, capped so users never wait long."""
     try:
@@ -492,7 +507,7 @@ class LLMClient:
                     candidates.append(m)
 
         # Standard resilient fallbacks for OpenAI-compatible gateways
-        candidates.extend(["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.8-27b"])
+        candidates.extend(["openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
 
         seen = set()
         ordered: List[str] = []
@@ -500,7 +515,7 @@ class LLMClient:
             if m and m not in seen:
                 seen.add(m)
                 ordered.append(m)
-        return ordered or ["qwen/qwen3.8-27b"]
+        return _drop_dead_models(ordered) or ["qwen/qwen3.8-27b"]
 
     def _get_active_model(self, messages: List[Dict[str, Any]]) -> str:
         """Dynamically picks the active primary model."""
@@ -987,7 +1002,8 @@ class LLMClient:
                             "stream": False,
                         }
                         res = await client.post(endpoint, json=payload, headers=headers)
-                        if res.status_code in (429, 500, 502, 503) and tool_model_idx + 1 < len(models_to_try):
+                        _mark_model_dead(active_model, res.status_code)
+                        if res.status_code in (403, 404, 429, 500, 502, 503) and tool_model_idx + 1 < len(models_to_try):
                             if res.status_code == 429:
                                 await asyncio.sleep(_retry_after_seconds(res.headers, cap=1.5))
                             tool_model_idx += 1
@@ -1292,6 +1308,7 @@ class LLMClient:
                             err_bytes = await response.aread()
                             if response.status_code == 429:
                                 await asyncio.sleep(_retry_after_seconds(response.headers))
+                            _mark_model_dead(candidate_model, response.status_code)
                             last_status = response.status_code
                             last_body = err_bytes.decode("utf-8", errors="ignore")
                             last_exc = None

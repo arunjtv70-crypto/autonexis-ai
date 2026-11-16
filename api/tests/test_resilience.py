@@ -78,3 +78,29 @@ def test_chip_on_forces_search_and_injects_results(monkeypatch):
     asyncio.run(run())
     assert searched and searched[0][0] == "web_search"
     assert "India won by 5 wickets" in seen["system"]
+
+
+def test_dead_model_is_skipped_after_403(monkeypatch):
+    lc._DEAD_MODELS.clear()
+    monkeypatch.setenv("LLM_FALLBACK_MODELS", "m2")
+    monkeypatch.setenv("LLM_MODEL", "m1")
+    calls = []
+
+    def handler(request):
+        m = json.loads(request.content)["model"]
+        calls.append(m)
+        if m == "m1":
+            return httpx.Response(403, json={"error": "no"})
+        return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(lc.httpx, "AsyncClient", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler)))
+    client = lc.LLMClient()
+
+    async def once():
+        async for _ in client.chat_stream([{"role": "user", "content": "hi"}], uid="u1"):
+            pass
+
+    asyncio.run(once()); first = list(calls); calls.clear()
+    asyncio.run(once())
+    assert "m1" in first and "m1" not in calls
