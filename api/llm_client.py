@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone as dt_timezone
-from typing import AsyncGenerator, List, Dict, Any, Optional, Union
+from typing import AsyncGenerator, List, Dict, Any, Optional, Tuple, Union
 import httpx
 from config import settings
 from math_engine import EXACT_MATH_TOOL_DEFINITION, execute_exact_math, is_math_request
@@ -24,6 +24,7 @@ from prompts import (
     CHAT_SUMMARIZATION_SYSTEM_PROMPT,
     VOICE_PROMPT,
     LIVE_DATA_POLICY_PROMPT,
+    CONVERSATION_QUALITY_PROMPT,
     format_user_context_block,
     format_project_context_block,
     format_past_chats_context_block,
@@ -118,7 +119,7 @@ def _format_safe_upstream_error(
     if status_code == 413:
         return "The attached image request is too large to process (HTTP 413). Try cropping or attaching fewer images."
     if status_code == 429:
-        return "Too many requests right now (rate limit HTTP 429). Please wait a few seconds and try again."
+        return "I'm getting a lot of requests right now. Give me a few seconds and send that again."
     if status_code in (401, 403):
         return f"{'Image analysis' if is_vision else 'Request'} could not authenticate upstream (HTTP {status_code})."
     if status_code in (408, 504):
@@ -200,6 +201,10 @@ _SEARCH_INTENT_RE = re.compile(
     r"\b(latest|news|today|weather|forecast|temperature|price|stock|score|match|winner|current|released|happened|update|search)\b",
     re.I,
 )
+_LIVE_FACT_RE = re.compile(
+    r"\b(news|khabar|latest|live\s+score|score|scorecard|kaun\s+jeeta|who\s+won|winner|result|schedule|fixture|released|release\s+date|election|breaking|ipl|world\s+cup|petrol\s+price|gold\s+rate|sone\s+ka\s+bhav)\b",
+    re.I,
+)
 _CODE_OR_TABLE_RE = re.compile(
     r"\b(code|script|function|program|class|sql|html|css|python|javascript|typescript|table|compare|comparison|chart|matrix|document|article|essay)\b",
     re.I,
@@ -226,8 +231,50 @@ def _is_canned_or_repetitive(candidate: str, prev_assistant_text: str = "") -> b
     return False
 
 
+def _build_search_query(messages: List[Dict[str, Any]], last_user_text: str) -> str:
+    """Search query = latest user message; very short follow-ups get the previous user message as context."""
+    q = (last_user_text or "").strip()
+    if len(q.split()) <= 3:
+        prior = []
+        for m in messages[:-1]:
+            if m.get("role") == "user":
+                t = extract_text_from_content(m.get("content", "")).strip()
+                if t:
+                    prior.append(t)
+        if prior:
+            q = f"{prior[-1][:160]} {q}"
+    return q[:300]
+
+
+def _retry_after_seconds(headers: Any, cap: float = 3.0) -> float:
+    """Reads Retry-After (seconds) from upstream headers, capped so users never wait long."""
+    try:
+        raw = headers.get("retry-after") if headers else None
+        if raw is None:
+            return 0.0
+        return max(0.0, min(float(raw), cap))
+    except Exception:
+        return 0.0
+
+
+def _extra_provider_targets() -> List[Tuple[str, Dict[str, str], str]]:
+    """Optional second provider (its own account) used only after the primary chain is exhausted.
+    Configured by LLM_FALLBACK_1_BASE_URL / LLM_FALLBACK_1_API_KEY / LLM_FALLBACK_1_MODEL."""
+    base = (os.environ.get("LLM_FALLBACK_1_BASE_URL") or "").strip().rstrip("/")
+    key = (os.environ.get("LLM_FALLBACK_1_API_KEY") or "").strip()
+    model = (os.environ.get("LLM_FALLBACK_1_MODEL") or "").strip()
+    if not (base and key and model):
+        return []
+    return [(f"{base}/chat/completions", {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, model)]
+
+
 def _get_tavily_key() -> str:
-    return (os.environ.get("TAVILY_API_KEY") or getattr(settings, "tavily_api_key", "") or "").strip()
+    return (
+        os.environ.get("TAVILY_API_KEY")
+        or os.environ.get("SEARCH_API_KEY")
+        or getattr(settings, "tavily_api_key", "")
+        or ""
+    ).strip()
 
 
 async def execute_web_search(query: str) -> str:
@@ -337,7 +384,7 @@ def get_last_user_text(messages: List[Dict[str, Any]]) -> str:
             return extract_text_from_content(msg.get("content", ""))
     return ""
 
-def detect_language_directive(user_text: str) -> str:
+def detect_language_directive(user_text: str, recent_user_texts: Optional[List[str]] = None) -> str:
     """
     Analyzes the user's message and outputs a strict language matching directive
     so the model speaks in the exact same language (Hinglish, English, or Hindi).
@@ -367,13 +414,21 @@ def detect_language_directive(user_text: str) -> str:
         "pehle", "pichli", "purani", "yaad", "bolo", "bhi", "sahi", "sab", "toh", "to"
     }
     
-    words = set(w.lower().strip(".,!?:;\"'()[]{}") for w in clean.split())
-    if any(w in hinglish_markers for w in words):
+    hinglish_markers |= {
+        "btao", "bta", "btana", "batana", "ka", "ki", "ke", "kitna", "kitni", "kitne", "mujhe", "mujhko",
+        "hum", "humne", "unka", "uska", "iska", "isme", "usme", "lekin", "par", "aur", "ya", "kyunki",
+        "chahta", "chahti", "wala", "wali", "wale", "kr", "krna", "krdo", "kardo", "dikhao", "samjhao",
+        "jaldi", "abhi", "phir", "fir", "waise", "matlab", "sirf", "zyada", "jada", "kam", "sach", "jhuth",
+    }
+    sample = [clean] + [t for t in (recent_user_texts or [])[-3:] if t]
+    hits = 0
+    for t in sample:
+        ws = set(w.lower().strip(".,!?:;\"'()[]{}") for w in t.split())
+        hits += len(ws & hinglish_markers)
+    if hits >= 1:
         return (
-            "LANGUAGE MANDATE (CRITICAL - HIGHEST PRIORITY):\n"
-            "The user is speaking to you in HINGLISH (Hindi typed in English alphabet, e.g. 'kya kar rhe ho', 'me aaj dukhi hu').\n"
-            "You MUST reply in natural, conversational HINGLISH using the English/Roman alphabet (e.g. 'Main theek hoon! Aap batao, sab kaisa chal raha hai?').\n"
-            "DO NOT USE DEVANAGARI SCRIPT (हिंदी)! Strictly use Roman/English alphabet to match the user."
+            "LANGUAGE: The user writes Hindi in Roman letters (Hinglish). Reply in the same casual Hinglish, Roman script only, "
+            "matching their register. No Devanagari. Technical terms and names stay in English."
         )
     
     # 3. Default to English
@@ -437,7 +492,7 @@ class LLMClient:
                     candidates.append(m)
 
         # Standard resilient fallbacks for OpenAI-compatible gateways
-        candidates.extend(["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
+        candidates.extend(["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.8-27b"])
 
         seen = set()
         ordered: List[str] = []
@@ -470,7 +525,7 @@ class LLMClient:
         Prepends the strict AUTONEXIS Assistant system prompt plus persistent memory,
         in-chat memory context, live data context, user personalization context, project context, past chats context, custom style, abuse & safety rules, math rigor prompt, and language matching directive.
         """
-        extra_system_context = []
+        extra_system_context = [CONVERSATION_QUALITY_PROMPT]
 
         # Always include abuse & safety and live data policies
         extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
@@ -578,18 +633,12 @@ class LLMClient:
                 })
                 last_user_text = text_val
 
-        # Anti-Repetition Guard: actively prevent the assistant from repeating its previous response or canned boilerplate
+        # Anti-repetition: no quoting of earlier replies (quoting makes the model echo odd openers).
         if prev_assistant_text:
-            clean_prev = re.sub(r"<think>[\s\S]*?</think>", "", prev_assistant_text).strip()
-            first_sentence = clean_prev.split("\n")[0][:140].strip()
-            if first_sentence:
-                extra_system_context.append(
-                    f"[CONVERSATIONAL VARIETY & ANTI-REPETITION MANDATE]:\n"
-                    f"In your previous turn, you said: \"{first_sentence}\"\n"
-                    "You MUST NOT repeat that sentence, phrasing, or sentiment. "
-                    "Provide a completely fresh, natural response that directly addresses what the user just said. "
-                    "Do NOT use robotic customer-support clichés ('madad ke liye yahan hoon', etc.)."
-                )
+            extra_system_context.append(
+                "[VARIETY]: Do not open with the same words as your previous reply and do not reuse stock phrases. "
+                "Respond to what the user just said."
+            )
 
         # Conversational intent & tone matching guidelines
         if last_user_text:
@@ -657,7 +706,10 @@ class LLMClient:
                         "VOICE LANGUAGE MANDATE: The user spoke in English. Reply completely in natural spoken English."
                     )
             else:
-                lang_mandate = detect_language_directive(last_user_text)
+                lang_mandate = detect_language_directive(
+                    last_user_text,
+                    [extract_text_from_content(m.get("content", "")) for m in trimmed_messages if m.get("role") == "user"][:-1],
+                )
                 extra_system_context.append(lang_mandate)
 
         full_system = self.system_prompt
@@ -844,7 +896,11 @@ class LLMClient:
 
         has_tavily = bool(_get_tavily_key())
         web_search_requested = bool(user_context and user_context.get("web_search"))
-        use_web_tool = has_tavily and (web_search_requested or (voice and bool(_SEARCH_INTENT_RE.search(last_user_text))))
+        # Search is decided by the app, not by the model: chip ON (or a live-fact question) always searches.
+        wants_search = has_tavily and not is_vision and (
+            web_search_requested or (not is_guest and bool(_LIVE_FACT_RE.search(last_user_text or "")))
+        )
+        use_web_tool = False
         is_borderline_image = bool(router_result and router_result.get("intent") == "chat" and float(router_result.get("confidence", 1.0)) <= 0.65)
         use_image_tool_backup = (not voice and not is_guest and bool(uid) and is_borderline_image and not is_vision)
 
@@ -868,6 +924,16 @@ class LLMClient:
             ui_sources = extract_ui_sources(tool_results)
 
             if ui_sources:
+                yield f"data: {json.dumps({'type': 'tool_sources', 'sources': ui_sources}, ensure_ascii=False)}\n\n"
+
+        if wants_search and not (tool_intents and not web_search_requested):
+            yield f"data: {json.dumps({'type': 'tool_status', 'status': 'Searching the web...', 'tool': 'web_search'}, ensure_ascii=False)}\n\n"
+            search_res = await execute_tool_call("web_search", {"query": _build_search_query(messages, last_user_text)}, uid=uid or "guest")
+            search_block = format_live_data_prompt_block([search_res])
+            live_data_block = (live_data_block + "\n\n" + search_block).strip() if live_data_block else search_block
+            for src in extract_ui_sources([search_res]):
+                ui_sources.append(src)
+            if search_res.ok:
                 yield f"data: {json.dumps({'type': 'tool_sources', 'sources': ui_sources}, ensure_ascii=False)}\n\n"
 
         # Keep multimodal image inputs on the dedicated vision route (fallback chain + self-check + stage progress)
@@ -906,6 +972,7 @@ class LLMClient:
                 timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     final_content = ""
+                    tool_model_idx = 0
                     max_turns = 4 if voice else 10
                     for _ in range(max_turns):
                         payload = {
@@ -920,8 +987,14 @@ class LLMClient:
                             "stream": False,
                         }
                         res = await client.post(endpoint, json=payload, headers=headers)
+                        if res.status_code in (429, 500, 502, 503) and tool_model_idx + 1 < len(models_to_try):
+                            if res.status_code == 429:
+                                await asyncio.sleep(_retry_after_seconds(res.headers, cap=1.5))
+                            tool_model_idx += 1
+                            active_model = models_to_try[tool_model_idx]
+                            continue
                         if res.status_code == 429:
-                            busy_msg = "Voice is busy, please try again shortly" if voice else FRIENDLY_ERROR_MESSAGE
+                            busy_msg = "Voice is busy, please try again shortly" if voice else _format_safe_upstream_error(429, "")
                             yield f"data: {json.dumps({'error': True, 'rate_limited': True, 'content': busy_msg}, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -1198,8 +1271,12 @@ class LLMClient:
         last_body = ""
         last_exc = None
         timeout = httpx.Timeout(connect=15.0, read=90.0, write=15.0, pool=15.0)
+        targets: List[Tuple[str, Dict[str, str], str]] = [(endpoint, headers, m) for m in models_to_try]
+        if not is_vision:
+            targets.extend(_extra_provider_targets())
+        models_to_try = [t[2] for t in targets]
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for attempt_idx, candidate_model in enumerate(models_to_try):
+            for attempt_idx, (t_endpoint, t_headers, candidate_model) in enumerate(targets):
                 payload = {
                     "model": candidate_model,
                     "messages": conversation,
@@ -1210,9 +1287,11 @@ class LLMClient:
                     "max_tokens": max_tokens,
                 }
                 try:
-                    async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                    async with client.stream("POST", t_endpoint, json=payload, headers=t_headers) as response:
                         if response.status_code != 200:
                             err_bytes = await response.aread()
+                            if response.status_code == 429:
+                                await asyncio.sleep(_retry_after_seconds(response.headers))
                             last_status = response.status_code
                             last_body = err_bytes.decode("utf-8", errors="ignore")
                             last_exc = None
