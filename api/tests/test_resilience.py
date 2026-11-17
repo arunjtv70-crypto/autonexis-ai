@@ -104,3 +104,31 @@ def test_dead_model_is_skipped_after_403(monkeypatch):
     asyncio.run(once()); first = list(calls); calls.clear()
     asyncio.run(once())
     assert "m1" in first and "m1" not in calls
+
+
+def test_second_and_third_provider_are_used(monkeypatch):
+    lc._COOLDOWN.clear(); lc._DEAD_MODELS.clear()
+    monkeypatch.setenv("LLM_MODEL", "m1"); monkeypatch.setenv("LLM_FALLBACK_MODELS", "m1")
+    for n, host in ((1, "p1.test"), (2, "p2.test")):
+        monkeypatch.setenv(f"LLM_FALLBACK_{n}_BASE_URL", f"https://{host}/v1")
+        monkeypatch.setenv(f"LLM_FALLBACK_{n}_API_KEY", "k")
+        monkeypatch.setenv(f"LLM_FALLBACK_{n}_MODEL", f"x{n}")
+    hosts = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        if request.url.host == "p2.test":
+            return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(429, headers={"retry-after": "0"}, json={"error": "rl"})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(lc.httpx, "AsyncClient", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler)))
+    client = lc.LLMClient()
+
+    async def run():
+        out = ""
+        async for ev in client.chat_stream([{"role": "user", "content": "hi"}], uid="u1"):
+            out += ev
+        return out
+
+    assert "ok" in asyncio.run(run()) and hosts[-1] == "p2.test"

@@ -273,14 +273,31 @@ def _retry_after_seconds(headers: Any, cap: float = 3.0) -> float:
 
 
 def _extra_provider_targets() -> List[Tuple[str, Dict[str, str], str]]:
-    """Optional second provider (its own account) used only after the primary chain is exhausted.
-    Configured by LLM_FALLBACK_1_BASE_URL / LLM_FALLBACK_1_API_KEY / LLM_FALLBACK_1_MODEL."""
-    base = (os.environ.get("LLM_FALLBACK_1_BASE_URL") or "").strip().rstrip("/")
-    key = (os.environ.get("LLM_FALLBACK_1_API_KEY") or "").strip()
-    model = (os.environ.get("LLM_FALLBACK_1_MODEL") or "").strip()
-    if not (base and key and model):
-        return []
-    return [(f"{base}/chat/completions", {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, model)]
+    """Optional extra providers, each with its own account (e.g. OpenRouter, Cerebras, Gemini).
+    Configure LLM_FALLBACK_<n>_BASE_URL / _API_KEY / _MODEL for n = 1..6. Used after the primary chain."""
+    out: List[Tuple[str, Dict[str, str], str]] = []
+    for n in range(1, 7):
+        base = (os.environ.get(f"LLM_FALLBACK_{n}_BASE_URL") or "").strip().rstrip("/")
+        key = (os.environ.get(f"LLM_FALLBACK_{n}_API_KEY") or "").strip()
+        model = (os.environ.get(f"LLM_FALLBACK_{n}_MODEL") or "").strip()
+        if base and key and model:
+            out.append((f"{base}/chat/completions", {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, model))
+    return out
+
+
+_COOLDOWN: Dict[Tuple[str, str], float] = {}
+
+
+def _cooldown_set(endpoint: str, model: str, seconds: float) -> None:
+    _COOLDOWN[(endpoint, model)] = time.monotonic() + max(1.0, min(seconds, 60.0))
+
+
+def _order_by_cooldown(targets: List[Tuple[str, Dict[str, str], str]]) -> List[Tuple[str, Dict[str, str], str]]:
+    """Targets that just hit a rate limit go last, so the next message uses a free one first."""
+    now = time.monotonic()
+    ready = [t for t in targets if _COOLDOWN.get((t[0], t[2]), 0.0) <= now]
+    cooling = [t for t in targets if t not in ready]
+    return ready + cooling
 
 
 def _get_tavily_key() -> str:
@@ -1298,6 +1315,7 @@ class LLMClient:
         targets: List[Tuple[str, Dict[str, str], str]] = [(endpoint, headers, m) for m in models_to_try]
         if not is_vision:
             targets.extend(_extra_provider_targets())
+        targets = _order_by_cooldown(targets)
         models_to_try = [t[2] for t in targets]
         async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt_idx, (t_endpoint, t_headers, candidate_model) in enumerate(targets):
@@ -1315,7 +1333,8 @@ class LLMClient:
                         if response.status_code != 200:
                             err_bytes = await response.aread()
                             if response.status_code == 429:
-                                await asyncio.sleep(_retry_after_seconds(response.headers))
+                                _cooldown_set(t_endpoint, candidate_model, _retry_after_seconds(response.headers, cap=60.0) or 15.0)
+                                await asyncio.sleep(min(_retry_after_seconds(response.headers), 0.5))
                             _mark_model_dead(candidate_model, response.status_code)
                             last_status = response.status_code
                             last_body = err_bytes.decode("utf-8", errors="ignore")
