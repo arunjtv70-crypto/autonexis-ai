@@ -117,7 +117,7 @@ def _format_safe_upstream_error(
 
     detail = _extract_upstream_error_detail(raw_body)
     if status_code == 413:
-        return "The attached image request is too large to process (HTTP 413). Try cropping or attaching fewer images."
+        return "That photo plus our chat is too much for me to process in one go right now. Send it again in a new chat or a smaller picture."
     if status_code == 429:
         return "I'm getting a lot of requests right now. Give me a few seconds and send that again."
     if status_code in (401, 403):
@@ -541,15 +541,23 @@ class LLMClient:
         in-chat memory context, live data context, user personalization context, project context, past chats context, custom style, abuse & safety rules, math rigor prompt, and language matching directive.
         """
         extra_system_context = [CONVERSATION_QUALITY_PROMPT]
+        # Image turns: the image itself costs thousands of tokens, and the free tier allows ~8k per request,
+        # so keep the prompt and history small (otherwise the provider answers HTTP 413).
+        slim_for_image = has_image_content(messages)
+        if slim_for_image:
+            max_history = min(max_history, 6)
+            relevant_past_chats = None
+            project_context = None
 
         # Always include abuse & safety and live data policies
         extra_system_context.append(ABUSE_AND_SAFETY_PROMPT)
-        extra_system_context.append(LIVE_DATA_POLICY_PROMPT)
+        if not slim_for_image:
+            extra_system_context.append(LIVE_DATA_POLICY_PROMPT)
 
         # Include voice live-call instructions when voice=True, otherwise mobile layout/table & image safety policy
         if voice:
             extra_system_context.append(VOICE_PROMPT)
-        else:
+        elif not slim_for_image:
             extra_system_context.append(TABLE_AND_LAYOUT_PROMPT)
             extra_system_context.append(IMAGE_GENERATION_CHAT_SAFETY_PROMPT)
 
@@ -1155,7 +1163,7 @@ class LLMClient:
         # -------------------------------------------------------------------
         # GENERAL CHAT & VISION ROUTE: True Real-time SSE Token Streaming
         # -------------------------------------------------------------------
-        max_tokens = voice_max_tokens if voice else (512 if is_guest else 2048)
+        max_tokens = voice_max_tokens if voice else (512 if is_guest else (1200 if is_vision else 2048))
         conversation = self._prepare_messages(
             messages,
             user_memory,
