@@ -21,6 +21,7 @@ import httpx
 
 from config import settings
 from image_adapter import ImageProviderError, image_adapter
+
 from image_blocklist import check_blocklist, detect_script_language, get_calm_refusal_message
 from image_router import _rough_subject, infer_style_and_aspect
 from prompts import IMAGE_ENHANCER_SYSTEM_PROMPT, IMAGE_MODERATION_SYSTEM_PROMPT
@@ -161,6 +162,37 @@ def record_violation(uid: str, category: str) -> Dict[str, Any]:
     }
 
 
+_TECHNICAL_MODERATION_CATEGORIES = ("moderation_unavailable", "moderation_uncertain")
+
+
+def _moderation_targets() -> list:
+    """Primary model, then env fallback models, then extra providers (same chain the chat uses)."""
+    from llm_client import _extra_provider_targets, _drop_dead_models
+    api_key, base_url, model = _get_llm_credentials()
+    out = []
+    if api_key and base_url:
+        names = [model] if model else []
+        for m in (os.environ.get("LLM_FALLBACK_MODELS") or "").split(","):
+            m = m.strip()
+            if m and m not in names:
+                names.append(m)
+        for m in ("openai/gpt-oss-20b", "qwen/qwen3.8-27b"):
+            if m not in names:
+                names.append(m)
+        hdr = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        out = [(f"{base_url}/chat/completions", hdr, m) for m in _drop_dead_models(names)]
+    return out + list(_extra_provider_targets())
+
+
+def _technical_failure(cat: str) -> "ImageServiceError":
+    return ImageServiceError(
+        "The image service is busy for a moment. Please send that again in a few seconds.",
+        status_code=503,
+        rate_limited=True,
+        retry_after=8,
+    )
+
+
 async def moderate_image_text(text: str) -> Tuple[bool, str]:
     """
     Fail-closed two-step moderation:
@@ -172,29 +204,29 @@ async def moderate_image_text(text: str) -> Tuple[bool, str]:
     if not allowed_bl:
         return False, bl_cat or "unsafe"
 
-    api_key, base_url, model = _get_llm_credentials()
-    if not api_key or not base_url or not model:
+    targets = _moderation_targets()
+    if not targets:
         # Strict fail-closed policy
         return False, "moderation_unavailable"
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": IMAGE_MODERATION_SYSTEM_PROMPT},
-            {"role": "user", "content": (text or "")[:800]},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 450,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
+    # Try each configured model/provider; a model that is blocked (403/404) or rate limited (429) is skipped.
+    for url, headers, model in targets:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": IMAGE_MODERATION_SYSTEM_PROMPT},
+                {"role": "user", "content": (text or "")[:800]},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 450,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(url, headers=headers, json=payload)
             if res.status_code != 200:
-                return False, "moderation_unavailable"
+                from llm_client import _mark_model_dead
+                _mark_model_dead(model, res.status_code)
+                continue
             raw = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
             parsed = json.loads(_strip_json_fences(raw))
             if not isinstance(parsed, dict) or "allowed" not in parsed:
@@ -203,8 +235,9 @@ async def moderate_image_text(text: str) -> Tuple[bool, str]:
                 return True, "safe"
             cat = str(parsed.get("category") or "unsafe").strip()
             return False, cat
-    except Exception:
-        return False, "moderation_unavailable"
+        except Exception:
+            continue
+    return False, "moderation_unavailable"
 
 
 async def enhance_image_request(
@@ -464,6 +497,8 @@ async def execute_image_generation(
 
     # Moderation check #1 (fail closed) BEFORE reserving image quota
     allowed_1, cat_1 = await moderate_image_text(clean_req)
+    if not allowed_1 and cat_1 in _TECHNICAL_MODERATION_CATEGORIES:
+        raise _technical_failure(cat_1)
     if not allowed_1:
         mod_log = record_violation(uid, cat_1)
         raise ImageServiceError(
@@ -491,6 +526,8 @@ async def execute_image_generation(
 
         # Moderation check #2 on enhanced English prompt (fail closed)
         allowed_2, cat_2 = await moderate_image_text(enhanced["enhanced_prompt"])
+        if not allowed_2 and cat_2 in _TECHNICAL_MODERATION_CATEGORIES:
+            raise _technical_failure(cat_2)
         if not allowed_2:
             mod_log = record_violation(uid, cat_2)
             raise ImageServiceError(

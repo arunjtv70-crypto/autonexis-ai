@@ -104,3 +104,20 @@ def test_dead_model_is_skipped_after_403(monkeypatch):
     asyncio.run(once()); first = list(calls); calls.clear()
     asyncio.run(once())
     assert "m1" in first and "m1" not in calls
+
+
+def test_image_moderation_uses_fallback_when_primary_blocked(monkeypatch):
+    import image_service as ims
+    lc._DEAD_MODELS.clear()
+    monkeypatch.setenv("LLM_API_KEY", "k"); monkeypatch.setenv("LLM_BASE_URL", "https://g.test/v1")
+    monkeypatch.setenv("LLM_MODEL", "blocked"); monkeypatch.setenv("LLM_FALLBACK_MODELS", "good")
+
+    def handler(request):
+        m = json.loads(request.content)["model"]
+        if m == "blocked":
+            return httpx.Response(403, json={"error": "no"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"allowed": true, "category": "safe"}'}}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(ims.httpx, "AsyncClient", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler)))
+    assert asyncio.run(ims.moderate_image_text("ek photo bna tree ka")) == (True, "safe")
